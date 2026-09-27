@@ -1,0 +1,7095 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local ContentProvider = game:GetService("ContentProvider")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+pcall(function()
+	RunService:UnbindFromRenderStep("ESP_SYSTEM_UPDATE")
+end)
+
+local ITEM_ID = 129702325120600
+local ITEM_IMAGE = "rbxthumb://type=Asset&id=" .. tostring(ITEM_ID) .. "&w=420&h=420"
+
+local SETTINGS = {
+	Names = false,
+	Distance = false,
+	Health = false,
+	Boxes = false,
+	Outline = false,
+	Skeleton = false,
+	Lines = false,
+	IgnoreTeammates = false,
+	NPCESP = false,
+
+	Vignette = false,
+	LowHealth = false,
+	DamageFX = false,
+	MotionBlur = false,
+	ColorBoost = false,
+	ReducedMotion = false,
+	ExtremeColors = false,
+	ExtremeExtremeColors = false,
+	ColorfulVFX = false,
+	CustomVFXColor = false,
+	NightMode = false,
+	HorrorMode = false,
+
+	WalkSpeed = false,
+	POV = false,
+	InfiniteJump = false,
+	LowGravity = false,
+	Spin = false,
+
+	Instinct = false,
+	CameraLock = false,
+
+	SpeedValue = 16,
+	FOVValue = 70,
+	SpinSpeedValue = 180,
+	InstinctRadius = 11,
+	VFXColor = Color3.fromRGB(95, 125, 255)
+}
+
+local ESP_MAX_DISTANCE = 6000
+local LOW_GRAVITY_MULTIPLIER = 0.12
+
+local INSTINCT_COOLDOWN = 0.05
+local INSTINCT_SEGMENTS = 48
+local INSTINCT_CHAIN_ATTEMPTS = 4
+local INSTINCT_ESCAPE_DISTANCE = 8
+local INSTINCT_SIDE_DISTANCE = 8
+local INSTINCT_BEHIND_DISTANCE = 6
+
+local OriginalGravity = workspace.Gravity
+
+local OriginalLighting = {
+	ClockTime = Lighting.ClockTime,
+	Brightness = Lighting.Brightness,
+	Ambient = Lighting.Ambient,
+	OutdoorAmbient = Lighting.OutdoorAmbient,
+	ExposureCompensation = Lighting.ExposureCompensation
+}
+
+local EspObjects = {}
+local NpcModels = {}
+local InstinctParts = {}
+local VFXInstances = setmetatable({}, {__mode = "k"})
+local CameraTargetRows = {}
+
+local CameraLockTarget = nil
+local CameraLockAutoRotateSaved = nil
+local CameraLockCameraTypeSaved = nil
+local CameraLockCameraSubjectSaved = nil
+
+local CameraLockHeight = 3.5
+local CameraLockDistance = 12
+local CameraLockTargetHeight = 1.6
+
+local POVSavedFOV = setmetatable({}, {__mode = "k"})
+local WalkSpeedSaved = setmetatable({}, {__mode = "k"})
+
+local SpinAngle = 0
+local LastInstinctTrigger = 0
+local LastHealth = nil
+local CameraPositionLast = nil
+local CameraLookLast = nil
+local CameraMotion = 0
+
+local Main
+local Content
+local CameraTargetList
+
+local draggingMain = false
+local dragStart
+local startPos
+local currentCameraConnection
+
+local function new(className, properties, parent)
+	local object = Instance.new(className)
+
+	for key, value in pairs(properties or {}) do
+		object[key] = value
+	end
+
+	object.Parent = parent
+	return object
+end
+
+local function corner(object, radius)
+	return new("UICorner", {
+		CornerRadius = UDim.new(0, radius)
+	}, object)
+end
+
+local function stroke(object, color, thickness, transparency)
+	return new("UIStroke", {
+		Color = color,
+		Thickness = thickness or 1,
+		Transparency = transparency or 0
+	}, object)
+end
+
+local function getCamera()
+	return workspace.CurrentCamera
+end
+
+local function getRoot(character)
+	return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHumanoid(character)
+	return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+local function getViewportSize()
+	local camera = getCamera()
+
+	if camera then
+		return camera.ViewportSize
+	end
+
+	return Vector2.new(1920, 1080)
+end
+
+local function isTeammate(player)
+	if not player or player == LocalPlayer or not SETTINGS.IgnoreTeammates then
+		return false
+	end
+
+	if not LocalPlayer.Team then
+		return false
+	end
+
+	return player.Team == LocalPlayer.Team
+end
+
+local oldGui = PlayerGui:FindFirstChild("SystemSettings")
+
+if oldGui then
+	oldGui:Destroy()
+end
+
+local oldESPDisplay = PlayerGui:FindFirstChild("ESPBillboards")
+
+if oldESPDisplay then
+	oldESPDisplay:Destroy()
+end
+
+for _, object in ipairs(workspace:GetChildren()) do
+	if object.Name == "InstinctRingSegment" then
+		object:Destroy()
+	end
+end
+
+local ESPFolder = workspace:FindFirstChild("ClientESP")
+
+if not ESPFolder then
+	ESPFolder = Instance.new("Folder")
+	ESPFolder.Name = "ClientESP"
+	ESPFolder.Parent = workspace
+end
+
+for _, object in ipairs(ESPFolder:GetChildren()) do
+	object:Destroy()
+end
+
+local Gui = new("ScreenGui", {
+	Name = "SystemSettings",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 10000,
+	Enabled = true
+}, PlayerGui)
+
+local ESPBillboards = new("ScreenGui", {
+	Name = "ESPBillboards",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 9998,
+	Enabled = true
+}, PlayerGui)
+
+local OpenButton = new("ImageButton", {
+	Name = "OpenButton",
+	Size = UDim2.fromOffset(54, 54),
+	Position = UDim2.new(0, 18, 0.5, -27),
+	BackgroundColor3 = Color3.fromRGB(16, 17, 21),
+	BorderSizePixel = 0,
+	Image = ITEM_IMAGE,
+	ImageTransparency = 0,
+	ScaleType = Enum.ScaleType.Fit,
+	AutoButtonColor = false,
+	Active = true,
+	Selectable = true,
+	Visible = true,
+	ZIndex = 5200
+}, Gui)
+
+corner(OpenButton, 11)
+stroke(OpenButton, Color3.fromRGB(57, 60, 70), 1)
+
+new("UIPadding", {
+	PaddingTop = UDim.new(0, 7),
+	PaddingBottom = UDim.new(0, 7),
+	PaddingLeft = UDim.new(0, 7),
+	PaddingRight = UDim.new(0, 7)
+}, OpenButton)
+
+local OpenButtonScale = new("UIScale", {
+	Scale = 1
+}, OpenButton)
+
+Main = new("Frame", {
+	Name = "ESP",
+	Size = UDim2.fromOffset(470, 550),
+	Position = UDim2.new(0.5, -235, 0.5, -275),
+	BackgroundColor3 = Color3.fromRGB(13, 14, 18),
+	BorderSizePixel = 0,
+	Visible = false,
+	Active = true,
+	ZIndex = 5000
+}, Gui)
+
+corner(Main, 14)
+stroke(Main, Color3.fromRGB(52, 55, 65), 1)
+
+local MainScale = new("UIScale", {
+	Scale = 1
+}, Main)
+
+local Shadow = new("Frame", {
+	Name = "Shadow",
+	Size = UDim2.new(1, 20, 1, 20),
+	Position = UDim2.fromOffset(-10, -10),
+	BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+	BackgroundTransparency = 0.62,
+	BorderSizePixel = 0,
+	Active = false,
+	ZIndex = 4999
+}, Main)
+
+corner(Shadow, 18)
+
+local Header = new("Frame", {
+	Name = "Header",
+	Size = UDim2.new(1, 0, 0, 64),
+	BackgroundColor3 = Color3.fromRGB(18, 19, 24),
+	BorderSizePixel = 0,
+	Active = true,
+	ZIndex = 5100
+}, Main)
+
+corner(Header, 14)
+
+new("Frame", {
+	Size = UDim2.new(1, 0, 0, 16),
+	Position = UDim2.new(0, 0, 1, -16),
+	BackgroundColor3 = Color3.fromRGB(18, 19, 24),
+	BorderSizePixel = 0,
+	Active = false,
+	ZIndex = 5100
+}, Header)
+
+new("ImageLabel", {
+	Name = "Icon",
+	Size = UDim2.fromOffset(36, 36),
+	Position = UDim2.fromOffset(16, 14),
+	BackgroundTransparency = 1,
+	Image = ITEM_IMAGE,
+	ScaleType = Enum.ScaleType.Fit,
+	Active = false,
+	ZIndex = 5110
+}, Header)
+
+new("TextLabel", {
+	Size = UDim2.new(1, -135, 1, 0),
+	Position = UDim2.fromOffset(61, 0),
+	BackgroundTransparency = 1,
+	Text = "ESP",
+	TextColor3 = Color3.fromRGB(245, 247, 250),
+	TextSize = 22,
+	Font = Enum.Font.GothamBold,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Center,
+	Active = false,
+	ZIndex = 5110
+}, Header)
+
+local Close = new("TextButton", {
+	Name = "Close",
+	Size = UDim2.fromOffset(38, 38),
+	Position = UDim2.new(1, -50, 0, 13),
+	BackgroundColor3 = Color3.fromRGB(29, 30, 37),
+	BorderSizePixel = 0,
+	Text = "×",
+	TextColor3 = Color3.fromRGB(230, 232, 239),
+	TextSize = 23,
+	Font = Enum.Font.GothamMedium,
+	AutoButtonColor = false,
+	Active = true,
+	ZIndex = 5120
+}, Header)
+
+corner(Close, 9)
+
+local Tabs = new("Frame", {
+	Size = UDim2.new(1, -28, 0, 40),
+	Position = UDim2.fromOffset(14, 76),
+	BackgroundTransparency = 1,
+	ZIndex = 5100
+}, Main)
+
+new("UIListLayout", {
+	FillDirection = Enum.FillDirection.Horizontal,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center,
+	VerticalAlignment = Enum.VerticalAlignment.Center,
+	Padding = UDim.new(0, 7)
+}, Tabs)
+
+Content = new("ScrollingFrame", {
+	Name = "Content",
+	Size = UDim2.new(1, -28, 1, -130),
+	Position = UDim2.fromOffset(14, 124),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ScrollBarThickness = 4,
+	ScrollBarImageTransparency = 0.25,
+	ScrollBarImageColor3 = Color3.fromRGB(100, 105, 120),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	CanvasSize = UDim2.new(),
+	ScrollingDirection = Enum.ScrollingDirection.Y,
+	Active = true,
+	ZIndex = 5100
+}, Main)
+
+new("UIPadding", {
+	PaddingTop = UDim.new(0, 5),
+	PaddingBottom = UDim.new(0, 14),
+	PaddingLeft = UDim.new(0, 3),
+	PaddingRight = UDim.new(0, 3)
+}, Content)
+
+new("UIListLayout", {
+	FillDirection = Enum.FillDirection.Vertical,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center,
+	SortOrder = Enum.SortOrder.LayoutOrder,
+	Padding = UDim.new(0, 9)
+}, Content)
+
+Main.DescendantAdded:Connect(function(object)
+	if object:IsA("GuiObject") then
+		object.ZIndex = math.max(object.ZIndex, 5100)
+	end
+end)
+
+local TabButtons = {}
+
+for _, name in ipairs({
+	"ESP",
+	"FX",
+	"MOVEMENT"
+}) do
+	local button = new("TextButton", {
+		Name = name,
+		Size = UDim2.fromOffset(135, 38),
+		BackgroundColor3 = Color3.fromRGB(25, 26, 32),
+		BorderSizePixel = 0,
+		Text = name,
+		TextColor3 = Color3.fromRGB(150, 154, 165),
+		TextSize = 12,
+		Font = Enum.Font.GothamBold,
+		AutoButtonColor = false,
+		Active = true,
+		ZIndex = 5120
+	}, Tabs)
+
+	corner(button, 8)
+	TabButtons[name] = button
+end
+
+local InstinctOverlapParams = OverlapParams.new()
+InstinctOverlapParams.FilterType =
+	Enum.RaycastFilterType.Exclude
+InstinctOverlapParams.MaxParts = 100
+InstinctOverlapParams.RespectCanCollide = false
+
+local InstinctSpaceParams = OverlapParams.new()
+InstinctSpaceParams.FilterType =
+	Enum.RaycastFilterType.Exclude
+InstinctSpaceParams.MaxParts = 30
+InstinctSpaceParams.RespectCanCollide = true
+
+local function updateInstinctFilters()
+	local filter = {}
+
+	if LocalPlayer.Character then
+		table.insert(filter, LocalPlayer.Character)
+	end
+
+	for _, part in ipairs(InstinctParts) do
+		if part and part.Parent then
+			table.insert(filter, part)
+		end
+	end
+
+	InstinctOverlapParams.FilterDescendantsInstances = filter
+end
+
+local function updateInstinctSpaceFilters(threatModel)
+	local filter = {}
+
+	if LocalPlayer.Character then
+		table.insert(filter, LocalPlayer.Character)
+	end
+
+	if threatModel then
+		table.insert(filter, threatModel)
+	end
+
+	for _, part in ipairs(InstinctParts) do
+		if part and part.Parent then
+			table.insert(filter, part)
+		end
+	end
+
+	InstinctSpaceParams.FilterDescendantsInstances = filter
+end
+
+local function destroyInstinctRing()
+	for _, part in ipairs(InstinctParts) do
+		if part and part.Parent then
+			part:Destroy()
+		end
+	end
+
+	table.clear(InstinctParts)
+end
+
+local function createInstinctRing()
+	if #InstinctParts > 0 then
+		return
+	end
+
+	for i = 1, INSTINCT_SEGMENTS do
+		local part = Instance.new("Part")
+
+		part.Name = "InstinctRingSegment"
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanTouch = false
+		part.CanQuery = false
+		part.CastShadow = false
+		part.Material = Enum.Material.Neon
+		part.Color = Color3.fromRGB(95, 125, 255)
+		part.Transparency = 0.3
+		part.Size = Vector3.new(0.11, 0.08, 1)
+		part.TopSurface = Enum.SurfaceType.Smooth
+		part.BottomSurface = Enum.SurfaceType.Smooth
+		part.Parent = workspace
+
+		table.insert(
+			InstinctParts,
+			part
+		)
+	end
+
+	updateInstinctFilters()
+end
+
+local function updateInstinctRing()
+	if not SETTINGS.Instinct then
+		if #InstinctParts > 0 then
+			destroyInstinctRing()
+		end
+
+		return
+	end
+
+	if #InstinctParts == 0 then
+		createInstinctRing()
+	end
+
+	local root = getRoot(
+		LocalPlayer.Character
+	)
+
+	if not root then
+		return
+	end
+
+	local center =
+		root.Position +
+		Vector3.new(0, 0.07, 0)
+
+	local radius =
+		SETTINGS.InstinctRadius
+
+	for i, part in ipairs(
+		InstinctParts
+	) do
+		local angle1 =
+			(
+				(i - 1) /
+				INSTINCT_SEGMENTS
+			) *
+			math.pi *
+			2
+
+		local angle2 =
+			(
+				i /
+				INSTINCT_SEGMENTS
+			) *
+			math.pi *
+			2
+
+		local p1 =
+			center +
+			Vector3.new(
+				math.cos(angle1) *
+					radius,
+				0,
+				math.sin(angle1) *
+					radius
+			)
+
+		local p2 =
+			center +
+			Vector3.new(
+				math.cos(angle2) *
+					radius,
+				0,
+				math.sin(angle2) *
+					radius
+			)
+
+		local difference =
+			p2 - p1
+
+		part.Size =
+			Vector3.new(
+				0.11,
+				0.08,
+				difference.Magnitude
+			)
+
+		part.CFrame =
+			CFrame.lookAt(
+				p1 +
+					difference *
+					0.5,
+				p2
+			)
+	end
+end
+
+local function getThreatRoot(model)
+	if not model
+		or not model:IsA("Model")
+		or model == LocalPlayer.Character then
+
+		return nil
+	end
+
+	local player =
+		Players:GetPlayerFromCharacter(
+			model
+		)
+
+	if player
+		and isTeammate(player) then
+		return nil
+	end
+
+	local humanoid =
+		getHumanoid(model)
+
+	local root =
+		getRoot(model)
+
+	if humanoid
+		and root
+		and humanoid.Health > 0 then
+
+		return root
+	end
+
+	return nil
+end
+
+local function findClosestThreat()
+	local localRoot =
+		getRoot(
+			LocalPlayer.Character
+		)
+
+	if not localRoot then
+		return nil
+	end
+
+	local radius =
+		SETTINGS.InstinctRadius +
+		3
+
+	local closestRoot
+	local closestDistance =
+		radius
+
+	local checkedCharacters = {}
+
+	for _, player in ipairs(
+		Players:GetPlayers()
+	) do
+		if player ~= LocalPlayer
+			and not isTeammate(player) then
+
+			local character =
+				player.Character
+
+			local root =
+				getThreatRoot(character)
+
+			if root then
+				local offset =
+					root.Position -
+					localRoot.Position
+
+				local horizontal =
+					Vector3.new(
+						offset.X,
+						0,
+						offset.Z
+					)
+
+				local distance =
+					horizontal.Magnitude
+
+				checkedCharacters[
+					character
+				] = true
+
+				if distance <= closestDistance then
+					closestDistance =
+						distance
+
+					closestRoot =
+						root
+				end
+			end
+		end
+	end
+
+	updateInstinctFilters()
+
+	local parts =
+		workspace:GetPartBoundsInRadius(
+			localRoot.Position,
+			radius,
+			InstinctOverlapParams
+		)
+
+	local checkedModels = {}
+
+	for _, part in ipairs(parts) do
+		local model =
+			part:FindFirstAncestorOfClass(
+				"Model"
+			)
+
+		if model
+			and not checkedModels[model]
+			and not checkedCharacters[model]
+			and model ~= LocalPlayer.Character then
+
+			checkedModels[model] = true
+
+			local root =
+				getThreatRoot(model)
+
+			if root then
+				local offset =
+					root.Position -
+					localRoot.Position
+
+				local horizontal =
+					Vector3.new(
+						offset.X,
+						0,
+						offset.Z
+					)
+
+				local distance =
+					horizontal.Magnitude
+
+				if distance <= closestDistance then
+					closestDistance =
+						distance
+
+					closestRoot =
+						root
+				end
+			end
+		end
+	end
+
+	return closestRoot
+end
+
+local function hasClearPath(
+	origin,
+	direction,
+	distance,
+	character,
+	threatModel
+)
+	local rayParams =
+		RaycastParams.new()
+
+	rayParams.FilterType =
+		Enum.RaycastFilterType.Exclude
+
+	rayParams.FilterDescendantsInstances = {
+		character,
+		threatModel
+	}
+
+	rayParams.IgnoreWater = true
+
+	for _, height in ipairs({
+		0.5,
+		1.8,
+		3.2
+	}) do
+		if workspace:Raycast(
+			origin +
+				Vector3.new(
+					0,
+					height,
+					0
+				),
+			direction *
+				distance,
+			rayParams
+		) then
+			return false
+		end
+	end
+
+	return true
+end
+
+local function isTargetSpaceClear(
+	target,
+	character,
+	threatModel
+)
+	updateInstinctSpaceFilters(
+		threatModel
+	)
+
+	local parts =
+		workspace:GetPartBoundsInBox(
+			CFrame.new(
+				target +
+					Vector3.new(
+						0,
+						2.2,
+						0
+					)
+			),
+			Vector3.new(
+				3.6,
+				4.2,
+				3.6
+			),
+			InstinctSpaceParams
+		)
+
+	return #parts == 0
+end
+
+local function getGroundedTarget(
+	position,
+	character,
+	threatModel
+)
+	local rayParams =
+		RaycastParams.new()
+
+	rayParams.FilterType =
+		Enum.RaycastFilterType.Exclude
+
+	rayParams.FilterDescendantsInstances = {
+		character,
+		threatModel
+	}
+
+	rayParams.IgnoreWater = true
+
+	local result =
+		workspace:Raycast(
+			position +
+				Vector3.new(
+					0,
+					10,
+					0
+				),
+			Vector3.new(
+				0,
+				-35,
+				0
+			),
+			rayParams
+		)
+
+	if result then
+		return Vector3.new(
+			position.X,
+			result.Position.Y +
+				3,
+			position.Z
+		)
+	end
+
+	return position
+end
+
+local function makeEscapeCandidate(
+	origin,
+	direction,
+	distance,
+	character,
+	threatRoot
+)
+	if direction.Magnitude < 0.001 then
+		return nil
+	end
+
+	direction =
+		Vector3.new(
+			direction.X,
+			0,
+			direction.Z
+		)
+
+	if direction.Magnitude < 0.001 then
+		return nil
+	end
+
+	direction = direction.Unit
+
+	local threatModel =
+		threatRoot and
+		threatRoot.Parent
+
+	if not hasClearPath(
+		origin,
+		direction,
+		distance,
+		character,
+		threatModel
+	) then
+		return nil
+	end
+
+	local target =
+		getGroundedTarget(
+			origin +
+				direction *
+				distance,
+			character,
+			threatModel
+		)
+
+	if not isTargetSpaceClear(
+		target,
+		character,
+		threatModel
+	) then
+		return nil
+	end
+
+	return target
+end
+
+local function getEscapePosition(threatRoot)
+	local character =
+		LocalPlayer.Character
+
+	local localRoot =
+		getRoot(character)
+
+	if not character
+		or not localRoot
+		or not threatRoot then
+
+		return nil
+	end
+
+	local origin =
+		localRoot.Position
+
+	local away =
+		origin -
+		threatRoot.Position
+
+	local horizontalAway =
+		Vector3.new(
+			away.X,
+			0,
+			away.Z
+		)
+
+	if horizontalAway.Magnitude < 0.05 then
+		horizontalAway =
+			Vector3.new(
+				-localRoot.CFrame.LookVector.X,
+				0,
+				-localRoot.CFrame.LookVector.Z
+			)
+	end
+
+	if horizontalAway.Magnitude < 0.05 then
+		horizontalAway =
+			Vector3.new(
+				0,
+				0,
+				1
+			)
+	end
+
+	local forward =
+		Vector3.new(
+			localRoot.CFrame.LookVector.X,
+			0,
+			localRoot.CFrame.LookVector.Z
+		)
+
+	local right =
+		Vector3.new(
+			localRoot.CFrame.RightVector.X,
+			0,
+			localRoot.CFrame.RightVector.Z
+		)
+
+	if forward.Magnitude > 0 then
+		forward = forward.Unit
+	end
+
+	if right.Magnitude > 0 then
+		right = right.Unit
+	end
+
+	local threatDirection =
+		Vector3.new(
+			threatRoot.Position.X -
+				origin.X,
+			0,
+			threatRoot.Position.Z -
+				origin.Z
+		)
+
+	if threatDirection.Magnitude > 0 then
+		threatDirection =
+			threatDirection.Unit
+	else
+		threatDirection =
+			forward
+	end
+
+	local candidates = {}
+
+	local directTarget =
+		makeEscapeCandidate(
+			origin,
+			horizontalAway,
+			INSTINCT_ESCAPE_DISTANCE,
+			character,
+			threatRoot
+		)
+
+	if directTarget then
+		table.insert(
+			candidates,
+			{
+				position = directTarget,
+				score =
+					(
+						directTarget -
+						threatRoot.Position
+					).Magnitude +
+					100
+			}
+		)
+	end
+
+	local leftTarget =
+		makeEscapeCandidate(
+			origin,
+			-right,
+			INSTINCT_SIDE_DISTANCE,
+			character,
+			threatRoot
+		)
+
+	if leftTarget then
+		table.insert(
+			candidates,
+			{
+				position = leftTarget,
+				score =
+					(
+						leftTarget -
+						threatRoot.Position
+					).Magnitude +
+					40
+			}
+		)
+	end
+
+	local rightTarget =
+		makeEscapeCandidate(
+			origin,
+			right,
+			INSTINCT_SIDE_DISTANCE,
+			character,
+			threatRoot
+		)
+
+	if rightTarget then
+		table.insert(
+			candidates,
+			{
+				position = rightTarget,
+				score =
+					(
+						rightTarget -
+						threatRoot.Position
+					).Magnitude +
+					40
+			}
+		)
+	end
+
+	if #candidates > 0 then
+		table.sort(
+			candidates,
+			function(a, b)
+				return a.score > b.score
+			end
+		)
+
+		return candidates[1].position
+	end
+
+	for _, direction in ipairs({
+		threatDirection,
+		forward
+	}) do
+		for _, distance in ipairs({
+			INSTINCT_BEHIND_DISTANCE,
+			INSTINCT_BEHIND_DISTANCE + 5,
+			INSTINCT_BEHIND_DISTANCE + 10,
+			INSTINCT_BEHIND_DISTANCE + 15
+		}) do
+			local target =
+				makeEscapeCandidate(
+					origin,
+					direction,
+					(
+						origin -
+						threatRoot.Position
+					).Magnitude +
+						distance,
+					character,
+					threatRoot
+				)
+
+			if target then
+				return target
+			end
+		end
+	end
+
+	return nil
+end
+
+local function triggerInstinct()
+	if not SETTINGS.Instinct then
+		return
+	end
+
+	local character =
+		LocalPlayer.Character
+
+	local localRoot =
+		getRoot(character)
+
+	local humanoid =
+		getHumanoid(character)
+
+	if not character
+		or not localRoot
+		or not humanoid
+		or humanoid.Health <= 0 then
+
+		return
+	end
+
+	local now = os.clock()
+
+	if now - LastInstinctTrigger <
+		INSTINCT_COOLDOWN then
+
+		return
+	end
+
+	local didTeleport = false
+
+	for _ = 1, INSTINCT_CHAIN_ATTEMPTS do
+		local threatRoot =
+			findClosestThreat()
+
+		if not threatRoot then
+			break
+		end
+
+		local currentRoot =
+			getRoot(character)
+
+		if not currentRoot then
+			break
+		end
+
+		local offset =
+			threatRoot.Position -
+			currentRoot.Position
+
+		local horizontal =
+			Vector3.new(
+				offset.X,
+				0,
+				offset.Z
+			)
+
+		if horizontal.Magnitude >
+			SETTINGS.InstinctRadius then
+
+			break
+		end
+
+		local targetPosition =
+			getEscapePosition(
+				threatRoot
+			)
+
+		if not targetPosition then
+			break
+		end
+
+		local rotation =
+			currentRoot.CFrame -
+			currentRoot.Position
+
+		character:PivotTo(
+			CFrame.new(
+				targetPosition
+			) *
+			rotation
+		)
+
+		didTeleport = true
+
+		task.wait()
+	end
+
+	if didTeleport then
+		LastInstinctTrigger = now
+	end
+end
+
+local function isVFXObject(object)
+	return object:IsA("ParticleEmitter")
+		or object:IsA("Beam")
+		or object:IsA("Trail")
+		or object:IsA("Fire")
+		or object:IsA("Smoke")
+		or object:IsA("Sparkles")
+end
+
+local function saveVFXOriginal(object)
+	if not object
+		or not object.Parent
+		or not isVFXObject(object)
+		or VFXInstances[object] then
+
+		return
+	end
+
+	if object:IsA("ParticleEmitter")
+		or object:IsA("Beam")
+		or object:IsA("Trail") then
+
+		VFXInstances[object] = {
+			Type = object.ClassName,
+			Color = object.Color
+		}
+	elseif object:IsA("Fire") then
+		VFXInstances[object] = {
+			Type = "Fire",
+			Color = object.Color,
+			SecondaryColor =
+				object.SecondaryColor
+		}
+	elseif object:IsA("Smoke") then
+		VFXInstances[object] = {
+			Type = "Smoke",
+			Color = object.Color
+		}
+	elseif object:IsA("Sparkles") then
+		VFXInstances[object] = {
+			Type = "Sparkles",
+			Color = object.SparkleColor
+		}
+	end
+end
+
+local function setVFXColor(
+	object,
+	color
+)
+	if not object
+		or not object.Parent
+		or not isVFXObject(object) then
+
+		return
+	end
+
+	saveVFXOriginal(object)
+
+	if object:IsA("ParticleEmitter")
+		or object:IsA("Beam")
+		or object:IsA("Trail") then
+
+		object.Color =
+			ColorSequence.new(
+				color
+			)
+	elseif object:IsA("Fire") then
+		object.Color = color
+		object.SecondaryColor =
+			color:Lerp(
+				Color3.new(
+					1,
+					1,
+					1
+				),
+				0.35
+			)
+	elseif object:IsA("Smoke") then
+		object.Color = color
+	elseif object:IsA("Sparkles") then
+		object.SparkleColor = color
+	end
+end
+
+local function restoreVFXColor(object)
+	local original =
+		VFXInstances[object]
+
+	if not original
+		or not object
+		or not object.Parent then
+
+		return
+	end
+
+	if original.Type ==
+		"ParticleEmitter"
+		or original.Type ==
+		"Beam"
+		or original.Type ==
+		"Trail" then
+
+		object.Color =
+			original.Color
+	elseif original.Type == "Fire" then
+		object.Color =
+			original.Color
+
+		object.SecondaryColor =
+			original.SecondaryColor
+	elseif original.Type == "Smoke" then
+		object.Color =
+			original.Color
+	elseif original.Type == "Sparkles" then
+		object.SparkleColor =
+			original.Color
+	end
+end
+
+local function enableVFXColorizer()
+	for object in pairs(VFXInstances) do
+		if object.Parent then
+			setVFXColor(
+				object,
+				SETTINGS.VFXColor
+			)
+		else
+			VFXInstances[object] = nil
+		end
+	end
+
+	for _, object in ipairs(
+		workspace:GetDescendants()
+	) do
+		if isVFXObject(object) then
+			saveVFXOriginal(object)
+
+			setVFXColor(
+				object,
+				SETTINGS.VFXColor
+			)
+		end
+	end
+end
+
+local function disableVFXColorizer()
+	for object in pairs(VFXInstances) do
+		if object.Parent then
+			restoreVFXColor(object)
+		else
+			VFXInstances[object] = nil
+		end
+	end
+end
+
+local function updateVFXColor()
+	if not SETTINGS.CustomVFXColor then
+		return
+	end
+
+	for object in pairs(VFXInstances) do
+		if object.Parent then
+			setVFXColor(
+				object,
+				SETTINGS.VFXColor
+			)
+		else
+			VFXInstances[object] = nil
+		end
+	end
+end
+
+workspace.DescendantAdded:Connect(
+	function(object)
+		if not isVFXObject(object) then
+			return
+		end
+
+		task.defer(
+			function()
+				if not object.Parent then
+					return
+				end
+
+				saveVFXOriginal(object)
+
+				if SETTINGS.CustomVFXColor then
+					setVFXColor(
+						object,
+						SETTINGS.VFXColor
+					)
+				end
+			end
+		)
+	end
+)
+
+workspace.DescendantRemoving:Connect(
+	function(object)
+		VFXInstances[object] = nil
+	end
+)
+
+for _, object in ipairs(
+	workspace:GetDescendants()
+) do
+	if isVFXObject(object) then
+		saveVFXOriginal(object)
+	end
+end
+
+local WalkSpeedSaved =
+	setmetatable(
+		{},
+		{
+			__mode = "k"
+		}
+	)
+
+local function captureWalkSpeed(humanoid)
+	if humanoid
+		and WalkSpeedSaved[humanoid] == nil then
+
+		WalkSpeedSaved[humanoid] =
+			humanoid.WalkSpeed
+	end
+end
+
+local function enableWalkSpeed()
+	local humanoid =
+		getHumanoid(
+			LocalPlayer.Character
+		)
+
+	if humanoid then
+		captureWalkSpeed(
+			humanoid
+		)
+
+		humanoid.WalkSpeed =
+			math.clamp(
+				tonumber(
+					SETTINGS.SpeedValue
+				) or 16,
+				0,
+				500
+			)
+	end
+end
+
+local function disableWalkSpeed()
+	local humanoid =
+		getHumanoid(
+			LocalPlayer.Character
+		)
+
+	if humanoid
+		and WalkSpeedSaved[humanoid] ~= nil then
+
+		humanoid.WalkSpeed =
+			WalkSpeedSaved[humanoid]
+
+		WalkSpeedSaved[humanoid] = nil
+	end
+end
+
+local function updateWalkSpeed()
+	local humanoid =
+		getHumanoid(
+			LocalPlayer.Character
+		)
+
+	if not humanoid then
+		return
+	end
+
+	if SETTINGS.WalkSpeed then
+		captureWalkSpeed(
+			humanoid
+		)
+
+		humanoid.WalkSpeed =
+			math.clamp(
+				tonumber(
+					SETTINGS.SpeedValue
+				) or 16,
+				0,
+				500
+			)
+	else
+		if WalkSpeedSaved[humanoid] ~= nil then
+			humanoid.WalkSpeed =
+				WalkSpeedSaved[humanoid]
+
+			WalkSpeedSaved[humanoid] = nil
+		end
+	end
+end
+
+local POVSavedFOV =
+	setmetatable(
+		{},
+		{
+			__mode = "k"
+		}
+	)
+
+local function capturePOV(camera)
+	if camera
+		and POVSavedFOV[camera] == nil then
+
+		POVSavedFOV[camera] =
+			camera.FieldOfView
+	end
+end
+
+local function applyPOV()
+	local camera =
+		getCamera()
+
+	if not camera then
+		return
+	end
+
+	if SETTINGS.POV then
+		capturePOV(camera)
+
+		camera.FieldOfView =
+			math.clamp(
+				tonumber(
+					SETTINGS.FOVValue
+				) or 70,
+				1,
+				120
+			)
+	else
+		local saved =
+			POVSavedFOV[camera]
+
+		if saved ~= nil then
+			camera.FieldOfView =
+				saved
+
+			POVSavedFOV[camera] =
+				nil
+		end
+	end
+end
+
+local function getCameraLockTarget()
+	if CameraLockTarget
+		and CameraLockTarget.Parent
+		and not isTeammate(
+			CameraLockTarget
+		) then
+
+		local character =
+			CameraLockTarget.Character
+
+		local humanoid =
+			getHumanoid(character)
+
+		local root =
+			getRoot(character)
+
+		if humanoid
+			and root
+			and humanoid.Health > 0 then
+
+			return root
+		end
+	end
+
+	local localRoot =
+		getRoot(
+			LocalPlayer.Character
+		)
+
+	if not localRoot then
+		return nil
+	end
+
+	local nearestRoot
+	local nearestDistance =
+		math.huge
+
+	for _, player in ipairs(
+		Players:GetPlayers()
+	) do
+		if player ~= LocalPlayer
+			and not isTeammate(player) then
+
+			local character =
+				player.Character
+
+			local humanoid =
+				getHumanoid(character)
+
+			local root =
+				getRoot(character)
+
+			if humanoid
+				and root
+				and humanoid.Health > 0 then
+
+				local offset =
+					root.Position -
+					localRoot.Position
+
+				local horizontal =
+					Vector3.new(
+						offset.X,
+						0,
+						offset.Z
+					)
+
+				local distance =
+					horizontal.Magnitude
+
+				if distance <
+					nearestDistance then
+
+					nearestDistance =
+						distance
+
+					nearestRoot =
+						root
+				end
+			end
+		end
+	end
+
+	return nearestRoot
+end
+
+local function restoreCameraLock()
+	local camera =
+		getCamera()
+
+	local humanoid =
+		getHumanoid(
+			LocalPlayer.Character
+		)
+
+	if humanoid
+		and CameraLockAutoRotateSaved
+			~= nil then
+
+		humanoid.AutoRotate =
+			CameraLockAutoRotateSaved
+	end
+
+	if camera then
+		camera.CameraType =
+			CameraLockCameraTypeSaved
+			or Enum.CameraType.Custom
+
+		if CameraLockCameraSubjectSaved then
+			camera.CameraSubject =
+				CameraLockCameraSubjectSaved
+		elseif humanoid then
+			camera.CameraSubject =
+				humanoid
+		end
+	end
+
+	CameraLockAutoRotateSaved = nil
+	CameraLockCameraTypeSaved = nil
+	CameraLockCameraSubjectSaved = nil
+end
+
+local function applyCameraLock()
+	if not SETTINGS.CameraLock then
+		restoreCameraLock()
+		return
+	end
+
+	local camera =
+		getCamera()
+
+	local character =
+		LocalPlayer.Character
+
+	local humanoid =
+		getHumanoid(character)
+
+	local localRoot =
+		getRoot(character)
+
+	if not camera
+		or not character
+		or not humanoid
+		or not localRoot
+		or humanoid.Health <= 0 then
+
+		return
+	end
+
+	local targetRoot =
+		getCameraLockTarget()
+
+	if not targetRoot then
+		restoreCameraLock()
+		return
+	end
+
+	if CameraLockAutoRotateSaved == nil then
+		CameraLockAutoRotateSaved =
+			humanoid.AutoRotate
+
+		CameraLockCameraTypeSaved =
+			camera.CameraType
+
+		CameraLockCameraSubjectSaved =
+			camera.CameraSubject
+	end
+
+	humanoid.AutoRotate = false
+
+	local targetPosition =
+		targetRoot.Position +
+		Vector3.new(
+			0,
+			CameraLockTargetHeight,
+			0
+		)
+
+	local flatTarget =
+		Vector3.new(
+			targetRoot.Position.X,
+			localRoot.Position.Y,
+			targetRoot.Position.Z
+		)
+
+	local direction =
+		flatTarget -
+		localRoot.Position
+
+	if direction.Magnitude > 0.05 then
+		localRoot.CFrame =
+			CFrame.lookAt(
+				localRoot.Position,
+				flatTarget
+			)
+	end
+
+	camera.CameraType =
+		Enum.CameraType.Scriptable
+
+	local cameraPosition =
+		localRoot.Position +
+		localRoot.CFrame.LookVector *
+		-CameraLockDistance +
+		Vector3.new(
+			0,
+			CameraLockHeight,
+			0
+		)
+
+	camera.CFrame =
+		CFrame.lookAt(
+			cameraPosition,
+			targetPosition
+		)
+end
+
+local function applyLowGravity()
+	if SETTINGS.LowGravity then
+		workspace.Gravity =
+			OriginalGravity *
+			LOW_GRAVITY_MULTIPLIER
+	else
+		if math.abs(
+			workspace.Gravity -
+			(
+				OriginalGravity *
+				LOW_GRAVITY_MULTIPLIER
+			)
+		) < 0.01 then
+
+			workspace.Gravity =
+				OriginalGravity
+		end
+	end
+end
+
+local function applySpin(deltaTime)
+	if not SETTINGS.Spin
+		or SETTINGS.CameraLock then
+		return
+	end
+
+	local character =
+		LocalPlayer.Character
+
+	local humanoid =
+		getHumanoid(character)
+
+	local root =
+		getRoot(character)
+
+	if not character
+		or not humanoid
+		or not root
+		or humanoid.Health <= 0 then
+
+		return
+	end
+
+	local speed =
+		tonumber(
+			SETTINGS.SpinSpeedValue
+		)
+		or 180
+
+	if speed == 0 then
+		return
+	end
+
+	SpinAngle =
+		(
+			SpinAngle +
+			math.rad(speed) *
+			deltaTime
+		)
+	%
+	(math.pi * 2)
+
+	local position =
+		root.Position
+
+	root.CFrame =
+		CFrame.new(position) *
+		CFrame.Angles(
+			0,
+			SpinAngle,
+			0
+		)
+end
+
+local SkeletonR15 = {
+	{"Head", "UpperTorso"},
+	{"UpperTorso", "LowerTorso"},
+	{"UpperTorso", "LeftUpperArm"},
+	{"LeftUpperArm", "LeftLowerArm"},
+	{"LeftLowerArm", "LeftHand"},
+	{"UpperTorso", "RightUpperArm"},
+	{"RightUpperArm", "RightLowerArm"},
+	{"RightLowerArm", "RightHand"},
+	{"LowerTorso", "LeftUpperLeg"},
+	{"LeftUpperLeg", "LeftLowerLeg"},
+	{"LeftLowerLeg", "LeftFoot"},
+	{"LowerTorso", "RightUpperLeg"},
+	{"RightUpperLeg", "RightLowerLeg"},
+	{"RightLowerLeg", "RightFoot"}
+}
+
+local SkeletonR6 = {
+	{"Head", "Torso"},
+	{"Torso", "Left Arm"},
+	{"Torso", "Right Arm"},
+	{"Torso", "Left Leg"},
+	{"Torso", "Right Leg"}
+}
+
+local function destroyESP(target)
+	local data =
+		EspObjects[target]
+
+	if not data then
+		return
+	end
+
+	for _, object in pairs(data) do
+		if typeof(object) == "Instance" then
+			if object.Parent then
+				object:Destroy()
+			end
+		elseif typeof(object) == "table" then
+			for _, item in ipairs(object) do
+				if typeof(item) == "Instance"
+					and item.Parent then
+
+					item:Destroy()
+				end
+			end
+		end
+	end
+
+	EspObjects[target] = nil
+end
+
+local function createSkeletonLine(parent, index)
+	return new("Frame", {
+		Name =
+			"Bone_" ..
+			index,
+		BackgroundColor3 =
+			Color3.fromRGB(
+				255,
+				255,
+				255
+			),
+		BorderSizePixel = 0,
+		Visible = false,
+		Active = false,
+		ZIndex = 5400
+	}, parent)
+end
+
+local function createESP(target, isPlayer)
+	if not target
+		or isPlayer and target == LocalPlayer then
+		return
+	end
+
+	destroyESP(target)
+
+	local uniqueId =
+		isPlayer
+		and tostring(
+			target.UserId
+		)
+		or target:GetDebugId()
+
+	local data = {}
+
+	local Billboard =
+		new(
+			"BillboardGui",
+			{
+				Name =
+					"ESP_" ..
+					uniqueId,
+				Size =
+					UDim2.fromOffset(
+						180,
+						62
+					),
+				StudsOffset =
+					Vector3.new(
+						0,
+						3.1,
+						0
+					),
+				AlwaysOnTop = true,
+				LightInfluence = 0,
+				Enabled = false,
+				MaxDistance =
+					ESP_MAX_DISTANCE,
+				Active = false,
+				ZIndexBehavior =
+					Enum.ZIndexBehavior.Sibling
+			},
+			ESPBillboards
+		)
+
+	local NameLabel =
+		new(
+			"TextLabel",
+			{
+				Size =
+					UDim2.new(
+						1,
+						0,
+						0,
+						22
+					),
+				BackgroundTransparency = 1,
+				Text =
+					isPlayer
+					and target.DisplayName
+					or target.Name,
+				TextColor3 =
+					Color3.fromRGB(
+						255,
+						255,
+						255
+					),
+				TextStrokeTransparency =
+					0.2,
+				TextSize = 14,
+				Font =
+					Enum.Font.GothamBold,
+				TextXAlignment =
+					Enum.TextXAlignment.Center,
+				Active = false,
+				ZIndex = 300
+			},
+			Billboard
+		)
+
+	local InfoLabel =
+		new(
+			"TextLabel",
+			{
+				Size =
+					UDim2.new(
+						1,
+						0,
+						0,
+						18
+					),
+				Position =
+					UDim2.fromOffset(
+						0,
+						21
+					),
+				BackgroundTransparency = 1,
+				TextColor3 =
+					Color3.fromRGB(
+						180,
+						190,
+						205
+					),
+				TextStrokeTransparency =
+					0.3,
+				TextSize = 11,
+				Font =
+					Enum.Font.GothamMedium,
+				TextXAlignment =
+					Enum.TextXAlignment.Center,
+				Active = false,
+				ZIndex = 300
+			},
+			Billboard
+		)
+
+	local HealthBillboard =
+		new(
+			"BillboardGui",
+			{
+				Name =
+					"Health_" ..
+					uniqueId,
+				Size =
+					UDim2.fromOffset(
+						16,
+						82
+					),
+				AlwaysOnTop = true,
+				LightInfluence = 0,
+				Enabled = false,
+				MaxDistance =
+					ESP_MAX_DISTANCE,
+				Active = false,
+				ZIndexBehavior =
+					Enum.ZIndexBehavior.Sibling
+			},
+			ESPBillboards
+		)
+
+	local HealthBack =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.fromOffset(
+						8,
+						72
+					),
+				Position =
+					UDim2.new(
+						0.5,
+						-4,
+						0.5,
+						-36
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						24,
+						25,
+						30
+					),
+				BorderSizePixel = 1,
+				BorderColor3 =
+					Color3.fromRGB(
+						70,
+						72,
+						80
+					),
+				Active = false,
+				ZIndex = 300
+			},
+			HealthBillboard
+		)
+
+	local HealthFill =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.new(
+						1,
+						0,
+						1,
+						0
+					),
+				Position =
+					UDim2.new(
+						0,
+						0,
+						1,
+						0
+					),
+				AnchorPoint =
+					Vector2.new(
+						0,
+						1
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						75,
+						210,
+						105
+					),
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 301
+			},
+			HealthBack
+		)
+
+	local Box =
+		new(
+			"Frame",
+			{
+				Name = "Box",
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				Visible = false,
+				Active = false,
+				ZIndex = 5300
+			},
+			Gui
+		)
+
+	local Top =
+		new(
+			"Frame",
+			{
+				Name = "Top",
+				BackgroundColor3 =
+					Color3.fromRGB(
+						255,
+						255,
+						255
+					),
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 5301
+			},
+			Box
+		)
+
+	local Bottom =
+		new(
+			"Frame",
+			{
+				Name = "Bottom",
+				BackgroundColor3 =
+					Color3.fromRGB(
+						255,
+						255,
+						255
+					),
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 5301
+			},
+			Box
+		)
+
+	local Left =
+		new(
+			"Frame",
+			{
+				Name = "Left",
+				BackgroundColor3 =
+					Color3.fromRGB(
+						255,
+						255,
+						255
+					),
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 5301
+			},
+			Box
+		)
+
+	local Right =
+		new(
+			"Frame",
+			{
+				Name = "Right",
+				BackgroundColor3 =
+					Color3.fromRGB(
+						255,
+						255,
+						255
+					),
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 5301
+			},
+			Box
+		)
+
+	local Skeleton =
+		new(
+			"Frame",
+			{
+				Name = "Skeleton",
+				Size =
+					UDim2.fromScale(
+						1,
+						1
+					),
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 5400
+			},
+			ESPBillboards
+		)
+
+	local SkeletonLines = {}
+
+	for i = 1, #SkeletonR15 do
+		table.insert(
+			SkeletonLines,
+			createSkeletonLine(
+				Skeleton,
+				i
+			)
+		)
+	end
+
+	for i = 1, #SkeletonR6 do
+		table.insert(
+			SkeletonLines,
+			createSkeletonLine(
+				Skeleton,
+				#SkeletonR15 + i
+			)
+		)
+	end
+
+	local Tracer =
+		new(
+			"Frame",
+			{
+				Name = "Tracer",
+				BackgroundColor3 =
+					Color3.fromRGB(
+						255,
+						255,
+						255
+					),
+				BorderSizePixel = 0,
+				Visible = false,
+				Active = false,
+				ZIndex = 5350
+			},
+			Gui
+		)
+
+	local Highlight =
+		Instance.new(
+			"Highlight"
+		)
+
+	Highlight.Name =
+		"Outline_" ..
+		uniqueId
+
+	Highlight.FillTransparency = 1
+	Highlight.OutlineTransparency = 0
+	Highlight.OutlineColor =
+		Color3.fromRGB(
+			255,
+			255,
+			255
+		)
+
+	Highlight.DepthMode =
+		Enum.HighlightDepthMode.AlwaysOnTop
+
+	Highlight.Enabled = false
+	Highlight.Parent =
+		ESPFolder
+
+	data.Target = target
+	data.IsPlayer = isPlayer
+	data.Billboard = Billboard
+	data.NameLabel = NameLabel
+	data.InfoLabel = InfoLabel
+	data.HealthBillboard = HealthBillboard
+	data.HealthBack = HealthBack
+	data.HealthFill = HealthFill
+	data.Box = Box
+	data.Top = Top
+	data.Bottom = Bottom
+	data.Left = Left
+	data.Right = Right
+	data.Skeleton = Skeleton
+	data.SkeletonLines = SkeletonLines
+	data.Tracer = Tracer
+	data.Highlight = Highlight
+
+	EspObjects[target] = data
+end
+
+local function isValidNPC(model)
+	if not model
+		or not model:IsA("Model") then
+		return false
+	end
+
+	if model == LocalPlayer.Character then
+		return false
+	end
+
+	if Players:GetPlayerFromCharacter(
+		model
+	) then
+		return false
+	end
+
+	return getHumanoid(model) ~= nil
+		and getRoot(model) ~= nil
+end
+
+local function registerNPC(model)
+	if not isValidNPC(model)
+		or NpcModels[model] then
+
+		return
+	end
+
+	NpcModels[model] = true
+	createESP(
+		model,
+		false
+	)
+end
+
+local function unregisterNPC(model)
+	NpcModels[model] = nil
+	destroyESP(model)
+end
+
+for _, object in ipairs(
+	workspace:GetDescendants()
+) do
+	if object:IsA("Model") then
+		registerNPC(object)
+	end
+end
+
+workspace.DescendantAdded:Connect(
+	function(object)
+		if object:IsA("Model") then
+			registerNPC(object)
+		elseif object:IsA("Humanoid")
+			or object.Name ==
+				"HumanoidRootPart" then
+
+			local model =
+				object:FindFirstAncestorOfClass(
+					"Model"
+				)
+
+			if model then
+				task.defer(
+					function()
+						registerNPC(model)
+					end
+				)
+			end
+		end
+	end
+)
+
+workspace.DescendantRemoving:Connect(
+	function(object)
+		if object:IsA("Model") then
+			task.defer(
+				function()
+					if not isValidNPC(object) then
+						unregisterNPC(
+							object
+						)
+					end
+				end
+			)
+		end
+	end
+)
+
+local function getDistanceScale(distance)
+	return math.clamp(
+		1 /
+			math.sqrt(
+				math.max(
+					distance,
+					10
+				) /
+				18
+			),
+		0.5,
+		1
+	)
+end
+
+local function calculateScreenBox(
+	character,
+	camera
+)
+	local root =
+		getRoot(character)
+
+	if not root then
+		return nil
+	end
+
+	local cf, size =
+		character:GetBoundingBox()
+
+	local half =
+		size / 2
+
+	local points = {
+		cf * Vector3.new(
+			-half.X,
+			-half.Y,
+			-half.Z
+		),
+		cf * Vector3.new(
+			-half.X,
+			-half.Y,
+			half.Z
+		),
+		cf * Vector3.new(
+			-half.X,
+			half.Y,
+			-half.Z
+		),
+		cf * Vector3.new(
+			-half.X,
+			half.Y,
+			half.Z
+		),
+		cf * Vector3.new(
+			half.X,
+			-half.Y,
+			-half.Z
+		),
+		cf * Vector3.new(
+			half.X,
+			-half.Y,
+			half.Z
+		),
+		cf * Vector3.new(
+			half.X,
+			half.Y,
+			-half.Z
+		),
+		cf * Vector3.new(
+			half.X,
+			half.Y,
+			half.Z
+		)
+	}
+
+	local minX = math.huge
+	local minY = math.huge
+	local maxX = -math.huge
+	local maxY = -math.huge
+	local visible = false
+
+	for _, point in ipairs(points) do
+		local screen =
+			camera:WorldToViewportPoint(
+				point
+			)
+
+		if screen.Z > 0 then
+			visible = true
+
+			minX =
+				math.min(
+					minX,
+					screen.X
+				)
+
+			minY =
+				math.min(
+					minY,
+					screen.Y
+				)
+
+			maxX =
+				math.max(
+					maxX,
+					screen.X
+				)
+
+			maxY =
+				math.max(
+					maxY,
+					screen.Y
+				)
+		end
+	end
+
+	if not visible then
+		return nil
+	end
+
+	local rootScreen =
+		camera:WorldToViewportPoint(
+			root.Position
+		)
+
+	if rootScreen.Z <= 0 then
+		return nil
+	end
+
+	local viewport =
+		camera.ViewportSize
+
+	if rootScreen.X < -250
+		or rootScreen.X >
+			viewport.X + 250
+		or rootScreen.Y < -250
+		or rootScreen.Y >
+			viewport.Y + 250 then
+
+		return nil
+	end
+
+	minX =
+		math.clamp(
+			minX,
+			0,
+			viewport.X
+		)
+
+	minY =
+		math.clamp(
+			minY,
+			0,
+			viewport.Y
+		)
+
+	maxX =
+		math.clamp(
+			maxX,
+			0,
+			viewport.X
+		)
+
+	maxY =
+		math.clamp(
+			maxY,
+			0,
+			viewport.Y
+		)
+
+	if maxX <= minX
+		or maxY <= minY then
+
+		return nil
+	end
+
+	return
+		minX,
+		minY,
+		math.max(
+			maxX - minX,
+			4
+		),
+		math.max(
+			maxY - minY,
+			8
+		)
+end
+
+local function getLinePoint(
+	worldPosition,
+	camera
+)
+	local screen =
+		camera:WorldToViewportPoint(
+			worldPosition
+		)
+
+	local viewport =
+		camera.ViewportSize
+
+	if screen.Z <= 0 then
+		local cameraSpace =
+			camera.CFrame:PointToObjectSpace(
+				worldPosition
+			)
+
+		local direction =
+			Vector2.new(
+				cameraSpace.X,
+				-cameraSpace.Y
+			)
+
+		if direction.Magnitude < 0.001 then
+			direction =
+				Vector2.new(
+					0,
+					1
+				)
+		end
+
+		direction = direction.Unit
+
+		local center =
+			Vector2.new(
+				viewport.X / 2,
+				viewport.Y / 2
+			)
+
+		local half =
+			Vector2.new(
+				viewport.X / 2 - 4,
+				viewport.Y / 2 - 4
+			)
+
+		local scaleX =
+			half.X /
+			math.max(
+				math.abs(
+					direction.X
+				),
+				0.0001
+			)
+
+		local scaleY =
+			half.Y /
+			math.max(
+				math.abs(
+					direction.Y
+				),
+				0.0001
+			)
+
+		local scale =
+			math.min(
+				scaleX,
+				scaleY
+			)
+
+		local edge =
+			center +
+			direction *
+			scale
+
+		return Vector2.new(
+			math.clamp(
+				edge.X,
+				0,
+				viewport.X
+			),
+			math.clamp(
+				edge.Y,
+				0,
+				viewport.Y
+			)
+		)
+	end
+
+	return Vector2.new(
+		screen.X,
+		screen.Y
+	)
+end
+
+local function setLineBetween(
+	line,
+	startPoint,
+	endPoint,
+	thickness
+)
+	local difference =
+		endPoint -
+		startPoint
+
+	local length =
+		difference.Magnitude
+
+	if length <= 0.5 then
+		line.Visible = false
+		return
+	end
+
+	local midpoint =
+		startPoint +
+		difference *
+		0.5
+
+	line.Position =
+		UDim2.fromOffset(
+			midpoint.X,
+			midpoint.Y
+		)
+
+	line.Size =
+		UDim2.fromOffset(
+			length,
+			thickness
+		)
+
+	line.AnchorPoint =
+		Vector2.new(
+			0.5,
+			0.5
+		)
+
+	line.Rotation =
+		math.deg(
+			math.atan2(
+				difference.Y,
+				difference.X
+			)
+		)
+
+	line.Visible = true
+end
+
+local function updateSkeleton(
+	data,
+	character,
+	camera
+)
+	if not SETTINGS.Skeleton then
+		data.Skeleton.Visible = false
+
+		for _, line in ipairs(
+			data.SkeletonLines
+		) do
+			line.Visible = false
+		end
+
+		return
+	end
+
+	local pairsToUse =
+		character:FindFirstChild(
+			"UpperTorso"
+		)
+		and SkeletonR15
+		or SkeletonR6
+
+	data.Skeleton.Visible = true
+
+	for i, bone in ipairs(
+		pairsToUse
+	) do
+		local partA =
+			character:FindFirstChild(
+				bone[1]
+			)
+
+		local partB =
+			character:FindFirstChild(
+				bone[2]
+			)
+
+		local line =
+			data.SkeletonLines[i]
+
+		if partA
+			and partA:IsA("BasePart")
+			and partB
+			and partB:IsA("BasePart") then
+
+			local pointA =
+				camera:WorldToViewportPoint(
+					partA.Position
+				)
+
+			local pointB =
+				camera:WorldToViewportPoint(
+					partB.Position
+				)
+
+			if pointA.Z > 0
+				and pointB.Z > 0 then
+
+				setLineBetween(
+					line,
+					Vector2.new(
+						pointA.X,
+						pointA.Y
+					),
+					Vector2.new(
+						pointB.X,
+						pointB.Y
+					),
+					2
+				)
+			else
+				line.Visible = false
+			end
+		else
+			line.Visible = false
+		end
+	end
+
+	for i =
+		#pairsToUse + 1,
+		#data.SkeletonLines do
+
+		data.SkeletonLines[i].Visible =
+			false
+	end
+end
+
+local function updateTracer(
+	data,
+	localRoot,
+	targetRoot,
+	camera
+)
+	if not SETTINGS.Lines
+		or not localRoot
+		or not targetRoot then
+
+		data.Tracer.Visible = false
+		return
+	end
+
+	local startPoint =
+		getLinePoint(
+			localRoot.Position,
+			camera
+		)
+
+	local endPoint =
+		getLinePoint(
+			targetRoot.Position,
+			camera
+		)
+
+	if not startPoint
+		or not endPoint then
+
+		data.Tracer.Visible = false
+		return
+	end
+
+	setLineBetween(
+		data.Tracer,
+		startPoint,
+		endPoint,
+		1.5
+	)
+end
+
+local function hideESP(data)
+	data.Billboard.Enabled = false
+	data.HealthBillboard.Enabled = false
+	data.Box.Visible = false
+	data.Highlight.Enabled = false
+	data.Skeleton.Visible = false
+	data.Tracer.Visible = false
+
+	for _, line in ipairs(
+		data.SkeletonLines
+	) do
+		line.Visible = false
+	end
+end
+
+local function updateESP(target)
+	local data =
+		EspObjects[target]
+
+	if not data then
+		if typeof(target) ==
+			"Instance"
+			and target:IsA("Player") then
+
+			createESP(
+				target,
+				true
+			)
+		elseif typeof(target) ==
+			"Instance"
+			and isValidNPC(target) then
+
+			createESP(
+				target,
+				false
+			)
+		end
+
+		data =
+			EspObjects[target]
+	end
+
+	if not data then
+		return
+	end
+
+	if data.IsPlayer
+		and isTeammate(
+			data.Target
+		) then
+
+		hideESP(data)
+		return
+	end
+
+	local character =
+		data.IsPlayer
+		and data.Target.Character
+		or data.Target
+
+	local humanoid =
+		getHumanoid(character)
+
+	local root =
+		getRoot(character)
+
+	local camera =
+		getCamera()
+
+	if not character
+		or not humanoid
+		or not root
+		or humanoid.Health <= 0
+		or not camera then
+
+		hideESP(data)
+		return
+	end
+
+	if not data.IsPlayer
+		and not SETTINGS.NPCESP then
+
+		hideESP(data)
+		return
+	end
+
+	local distance =
+		(
+			camera.CFrame.Position -
+			root.Position
+		).Magnitude
+
+	if distance > ESP_MAX_DISTANCE then
+		hideESP(data)
+		return
+	end
+
+	local distanceScale =
+		getDistanceScale(distance)
+
+	data.Billboard.Adornee = root
+	data.Billboard.Enabled =
+		SETTINGS.Names
+		or SETTINGS.Distance
+
+	data.Billboard.Size =
+		UDim2.fromOffset(
+			math.max(
+				90,
+				180 *
+					distanceScale
+			),
+			math.max(
+				31,
+				62 *
+					distanceScale
+			)
+		)
+
+	data.Billboard.StudsOffset =
+		Vector3.new(
+			0,
+			2.9 +
+				1.3 *
+				distanceScale,
+			0
+		)
+
+	data.NameLabel.Visible =
+		SETTINGS.Names
+
+	data.NameLabel.Text =
+		data.IsPlayer
+		and data.Target.DisplayName
+		or data.Target.Name
+
+	data.NameLabel.TextSize =
+		math.max(
+			10,
+			14 *
+				distanceScale
+		)
+
+	data.InfoLabel.Visible =
+		SETTINGS.Distance
+
+	data.InfoLabel.Text =
+		string.format(
+			"%d studs",
+			math.floor(
+				distance + 0.5
+			)
+		)
+
+	data.InfoLabel.TextSize =
+		math.max(
+			9,
+			11 *
+				distanceScale
+		)
+
+	data.HealthBillboard.Adornee =
+		root
+
+	data.HealthBillboard.Enabled =
+		SETTINGS.Health
+
+	local cameraRight =
+		camera.CFrame.RightVector
+
+	data.HealthBillboard.StudsOffsetWorldSpace =
+		-cameraRight *
+		(
+			2.25 *
+			distanceScale
+		)
+		+
+		Vector3.new(
+			0,
+			0.7 *
+				distanceScale,
+			0
+		)
+
+	data.HealthBillboard.Size =
+		UDim2.fromOffset(
+			math.max(
+				12,
+				16 *
+					distanceScale
+			),
+			math.max(
+				55,
+				82 *
+					distanceScale
+			)
+		)
+
+	data.HealthBack.Size =
+		UDim2.fromOffset(
+			math.max(
+				6,
+				8 *
+					distanceScale
+			),
+			math.max(
+				45,
+				72 *
+					distanceScale
+			)
+		)
+
+	data.HealthBack.Position =
+		UDim2.new(
+			0.5,
+			-math.max(
+				3,
+				4 *
+					distanceScale
+			),
+			0.5,
+			-math.max(
+				22,
+				36 *
+					distanceScale
+			)
+		)
+
+	if SETTINGS.Health then
+		local percent =
+			math.clamp(
+				humanoid.Health /
+					math.max(
+						humanoid.MaxHealth,
+						1
+					),
+				0,
+				1
+			)
+
+		data.HealthFill.Size =
+			UDim2.new(
+				1,
+				0,
+				percent,
+				0
+			)
+
+		data.HealthFill.BackgroundColor3 =
+			Color3.fromRGB(
+				255 -
+					math.floor(
+						percent *
+						180
+					),
+				75 +
+					math.floor(
+						percent *
+						165
+					),
+				75
+			)
+	end
+
+	if SETTINGS.Boxes then
+		local x,
+			y,
+			width,
+			height =
+			calculateScreenBox(
+				character,
+				camera
+			)
+
+		if x then
+			data.Box.Position =
+				UDim2.fromOffset(
+					math.floor(x),
+					math.floor(y)
+				)
+
+			data.Box.Size =
+				UDim2.fromOffset(
+					math.floor(width),
+					math.floor(height)
+				)
+
+			local thickness =
+				math.clamp(
+					math.floor(
+						math.min(
+							width,
+							height
+						) *
+						0.025
+					),
+					1,
+					3
+				)
+
+			data.Top.Size =
+				UDim2.new(
+					1,
+					0,
+					0,
+					thickness
+				)
+
+			data.Top.Position =
+				UDim2.fromOffset(
+					0,
+					0
+				)
+
+			data.Bottom.Size =
+				UDim2.new(
+					1,
+					0,
+					0,
+					thickness
+				)
+
+			data.Bottom.Position =
+				UDim2.new(
+					0,
+					0,
+					1,
+					-thickness
+				)
+
+			data.Left.Size =
+				UDim2.new(
+					0,
+					thickness,
+					1,
+					0
+				)
+
+			data.Left.Position =
+				UDim2.fromOffset(
+					0,
+					0
+				)
+
+			data.Right.Size =
+				UDim2.new(
+					0,
+					thickness,
+					1,
+					0
+				)
+
+			data.Right.Position =
+				UDim2.new(
+					1,
+					-thickness,
+					0,
+					0
+				)
+
+			data.Box.Visible = true
+		else
+			data.Box.Visible = false
+		end
+	else
+		data.Box.Visible = false
+	end
+
+	data.Highlight.Adornee =
+		character
+
+	data.Highlight.Enabled =
+		SETTINGS.Outline
+
+	updateSkeleton(
+		data,
+		character,
+		camera
+	)
+
+	updateTracer(
+		data,
+		getRoot(
+			LocalPlayer.Character
+		),
+		root,
+		camera
+	)
+end
+
+local function updateAllESP()
+	for _, player in ipairs(
+		Players:GetPlayers()
+	) do
+		if player ~= LocalPlayer then
+			updateESP(player)
+		end
+	end
+
+	for model in pairs(NpcModels) do
+		if model.Parent then
+			updateESP(model)
+		else
+			unregisterNPC(model)
+		end
+	end
+end
+
+local Blur =
+	Lighting:FindFirstChild(
+		"SystemSettingsMotionBlur"
+	)
+
+if not Blur then
+	Blur =
+		Instance.new(
+			"BlurEffect"
+		)
+
+	Blur.Name =
+		"SystemSettingsMotionBlur"
+
+	Blur.Parent =
+		Lighting
+end
+
+local ColorCorrection =
+	Lighting:FindFirstChild(
+		"SystemSettingsColorBoost"
+	)
+
+if not ColorCorrection then
+	ColorCorrection =
+		Instance.new(
+			"ColorCorrectionEffect"
+		)
+
+	ColorCorrection.Name =
+		"SystemSettingsColorBoost"
+
+	ColorCorrection.Parent =
+		Lighting
+end
+
+local ExtremeBloom =
+	Lighting:FindFirstChild(
+		"SystemSettingsExtremeBloom"
+	)
+
+if not ExtremeBloom then
+	ExtremeBloom =
+		Instance.new(
+			"BloomEffect"
+		)
+
+	ExtremeBloom.Name =
+		"SystemSettingsExtremeBloom"
+
+	ExtremeBloom.Parent =
+		Lighting
+end
+
+local HorrorCorrection =
+	Lighting:FindFirstChild(
+		"SystemSettingsHorror"
+	)
+
+if not HorrorCorrection then
+	HorrorCorrection =
+		Instance.new(
+			"ColorCorrectionEffect"
+		)
+
+	HorrorCorrection.Name =
+		"SystemSettingsHorror"
+
+	HorrorCorrection.Parent =
+		Lighting
+end
+
+local FXGui =
+	new(
+		"Frame",
+		{
+			Name = "ScreenFX",
+			Size =
+				UDim2.fromScale(
+					1,
+					1
+				),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Active = false,
+			ZIndex = 900
+		},
+		Gui
+	)
+
+local function makeVignette(
+	size,
+	position,
+	rotation
+)
+	local frame =
+		new(
+			"Frame",
+			{
+				Size = size,
+				Position = position,
+				BackgroundColor3 =
+					Color3.fromRGB(
+						95,
+						125,
+						255
+					),
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 901
+			},
+			FXGui
+		)
+
+	new(
+		"UIGradient",
+		{
+			Rotation = rotation,
+			Transparency =
+				NumberSequence.new(
+					{
+						NumberSequenceKeypoint.new(
+							0,
+							0.05
+						),
+						NumberSequenceKeypoint.new(
+							1,
+							1
+						)
+					}
+				)
+		},
+		frame
+	)
+
+	return frame
+end
+
+local TopVignette =
+	makeVignette(
+		UDim2.new(
+			1,
+			0,
+			0,
+			150
+		),
+		UDim2.fromScale(
+			0,
+			0
+		),
+		90
+	)
+
+local BottomVignette =
+	makeVignette(
+		UDim2.new(
+			1,
+			0,
+			0,
+			150
+		),
+		UDim2.new(
+			0,
+			0,
+			1,
+			-150
+		),
+		270
+	)
+
+local LeftVignette =
+	makeVignette(
+		UDim2.new(
+			0,
+			150,
+			1,
+			0
+		),
+		UDim2.fromScale(
+			0,
+			0
+		),
+		0
+	)
+
+local RightVignette =
+	makeVignette(
+		UDim2.new(
+			0,
+			150,
+			1,
+			0
+		),
+		UDim2.fromScale(
+			1,
+			0
+		),
+		180
+	)
+
+RightVignette.Position =
+	UDim2.new(
+		1,
+		-150,
+		0,
+		0
+	)
+
+local LowHealthOverlay =
+	new(
+		"Frame",
+		{
+			Name = "LowHealth",
+			Size =
+				UDim2.fromScale(
+					1,
+					1
+				),
+			BackgroundColor3 =
+				Color3.fromRGB(
+					170,
+					0,
+					0
+				),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Active = false,
+			ZIndex = 902
+		},
+		FXGui
+	)
+
+local DamageFlash =
+	new(
+		"Frame",
+		{
+			Name = "DamageFlash",
+			Size =
+				UDim2.fromScale(
+					1,
+					1
+				),
+			BackgroundColor3 =
+				Color3.fromRGB(
+					255,
+					45,
+					45
+				),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Active = false,
+			ZIndex = 903
+		},
+		FXGui
+	)
+
+local function connectHealth(
+	character
+)
+	local humanoid =
+		getHumanoid(character)
+
+	if not humanoid then
+		return
+	end
+
+	LastHealth =
+		humanoid.Health
+
+	humanoid.HealthChanged:Connect(
+		function(health)
+			if LastHealth
+				and health < LastHealth
+				and SETTINGS.DamageFX then
+
+				DamageFlash.BackgroundColor3 =
+					Color3.fromRGB(
+						255,
+						45,
+						45
+					)
+
+				DamageFlash.BackgroundTransparency =
+					SETTINGS.ReducedMotion
+					and 0.85
+					or 0.72
+
+				TweenService:Create(
+					DamageFlash,
+					TweenInfo.new(
+						SETTINGS.ReducedMotion
+						and 0.08
+						or 0.3,
+						Enum.EasingStyle.Quad,
+						Enum.EasingDirection.Out
+					),
+					{
+						BackgroundTransparency = 1
+					}
+				):Play()
+			end
+
+			LastHealth =
+				health
+		end
+	)
+end
+
+local function updateScreenFX()
+	local camera =
+		getCamera()
+
+	if camera then
+		local position =
+			camera.CFrame.Position
+
+		local look =
+			camera.CFrame.LookVector
+
+		if CameraPositionLast
+			and CameraLookLast then
+
+			local positionDelta =
+				(
+					position -
+					CameraPositionLast
+				).Magnitude
+
+			local lookDelta =
+				(
+					look -
+					CameraLookLast
+				).Magnitude
+
+			CameraMotion =
+				math.clamp(
+					positionDelta *
+						0.45 +
+						lookDelta *
+						14,
+					0,
+					1
+				)
+		end
+
+		CameraPositionLast =
+			position
+
+		CameraLookLast =
+			look
+	end
+
+	if SETTINGS.Vignette then
+		local transparency =
+			SETTINGS.ExtremeExtremeColors
+			and 0.04
+			or SETTINGS.ExtremeColors
+			and 0.08
+			or 0.18
+
+		TopVignette.BackgroundTransparency =
+			transparency
+
+		BottomVignette.BackgroundTransparency =
+			transparency
+
+		LeftVignette.BackgroundTransparency =
+			transparency
+
+		RightVignette.BackgroundTransparency =
+			transparency
+	else
+		TopVignette.BackgroundTransparency = 1
+		BottomVignette.BackgroundTransparency = 1
+		LeftVignette.BackgroundTransparency = 1
+		RightVignette.BackgroundTransparency = 1
+	end
+
+	local humanoid =
+		getHumanoid(
+			LocalPlayer.Character
+		)
+
+	if SETTINGS.LowHealth
+		and humanoid
+		and humanoid.MaxHealth > 0
+		and humanoid.Health > 0 then
+
+		local percent =
+			humanoid.Health /
+			humanoid.MaxHealth
+
+		if percent <= 0.35 then
+			local intensity =
+				1 -
+				math.clamp(
+					percent /
+						0.35,
+					0,
+					1
+				)
+
+			if SETTINGS.ReducedMotion then
+				LowHealthOverlay.BackgroundTransparency =
+					0.92
+			else
+				local pulse =
+					(
+						math.sin(
+							os.clock() *
+							5
+						) + 1
+					)
+					*
+					0.5
+
+				local strength =
+					0.1
+
+				if SETTINGS.ColorfulVFX then
+					strength += 0.08
+				end
+
+				if SETTINGS.ExtremeColors then
+					strength += 0.12
+				end
+
+				if SETTINGS.ExtremeExtremeColors then
+					strength += 0.2
+				end
+
+				LowHealthOverlay.BackgroundTransparency =
+					0.97
+					-
+					intensity *
+					strength
+					-
+					pulse *
+					intensity *
+					0.03
+			end
+		else
+			LowHealthOverlay.BackgroundTransparency =
+				1
+		end
+	else
+		LowHealthOverlay.BackgroundTransparency =
+			1
+	end
+
+	if SETTINGS.MotionBlur
+		and camera
+		and not SETTINGS.ReducedMotion then
+
+		local blurStrength = 7
+
+		if SETTINGS.ColorfulVFX then
+			blurStrength += 3
+		end
+
+		if SETTINGS.ExtremeColors then
+			blurStrength += 6
+		end
+
+		if SETTINGS.ExtremeExtremeColors then
+			blurStrength += 10
+		end
+
+		Blur.Size =
+			CameraMotion *
+			blurStrength
+	else
+		Blur.Size = 0
+	end
+
+	local saturation = 0
+	local contrast = 0
+	local brightness = 0
+
+	if SETTINGS.ColorBoost then
+		saturation += 0.08
+		contrast += 0.05
+	end
+
+	if SETTINGS.ColorfulVFX then
+		saturation += 0.4
+		contrast += 0.12
+	end
+
+	if SETTINGS.ExtremeColors then
+		saturation += 0.8
+		contrast += 0.35
+		brightness += 0.04
+	end
+
+	if SETTINGS.ExtremeExtremeColors then
+		saturation = 1
+		contrast = 1
+		brightness = 0.08
+	end
+
+	ColorCorrection.Saturation =
+		math.clamp(
+			saturation,
+			-1,
+			1
+		)
+
+	ColorCorrection.Contrast =
+		math.clamp(
+			contrast,
+			-1,
+			1
+		)
+
+	ColorCorrection.Brightness =
+		math.clamp(
+			brightness,
+			-1,
+			1
+		)
+
+	ColorCorrection.TintColor =
+		Color3.new(
+			1,
+			1,
+			1
+		)
+
+	ColorCorrection.Enabled =
+		SETTINGS.ColorBoost
+		or SETTINGS.ColorfulVFX
+		or SETTINGS.ExtremeColors
+		or SETTINGS.ExtremeExtremeColors
+
+	if SETTINGS.ExtremeExtremeColors then
+		ExtremeBloom.Intensity = 2.5
+		ExtremeBloom.Size = 32
+		ExtremeBloom.Threshold = 0.7
+	elseif SETTINGS.ExtremeColors then
+		ExtremeBloom.Intensity = 1.2
+		ExtremeBloom.Size = 28
+		ExtremeBloom.Threshold = 0.8
+	elseif SETTINGS.ColorfulVFX then
+		ExtremeBloom.Intensity = 0.45
+		ExtremeBloom.Size = 24
+		ExtremeBloom.Threshold = 1
+	else
+		ExtremeBloom.Intensity = 0
+		ExtremeBloom.Size = 24
+		ExtremeBloom.Threshold = 1
+	end
+
+	ExtremeBloom.Enabled =
+		SETTINGS.ColorfulVFX
+		or SETTINGS.ExtremeColors
+		or SETTINGS.ExtremeExtremeColors
+
+	if SETTINGS.NightMode then
+		Lighting.ClockTime = 0.5
+		Lighting.Brightness = 1.2
+		Lighting.Ambient =
+			Color3.fromRGB(
+				18,
+				22,
+				45
+			)
+		Lighting.OutdoorAmbient =
+			Color3.fromRGB(
+				10,
+				15,
+				35
+			)
+		Lighting.ExposureCompensation =
+			-0.15
+	else
+		Lighting.ClockTime =
+			OriginalLighting.ClockTime
+
+		Lighting.Brightness =
+			OriginalLighting.Brightness
+
+		Lighting.Ambient =
+			OriginalLighting.Ambient
+
+		Lighting.OutdoorAmbient =
+			OriginalLighting.OutdoorAmbient
+
+		Lighting.ExposureCompensation =
+			OriginalLighting.ExposureCompensation
+	end
+
+	HorrorCorrection.Enabled =
+		SETTINGS.HorrorMode
+
+	if SETTINGS.HorrorMode then
+		HorrorCorrection.Brightness =
+			-0.18
+
+		HorrorCorrection.Contrast =
+			0.4
+
+		HorrorCorrection.Saturation =
+			0.05
+
+		HorrorCorrection.TintColor =
+			Color3.fromRGB(
+				170,
+				105,
+				120
+			)
+	else
+		HorrorCorrection.Brightness = 0
+		HorrorCorrection.Contrast = 0
+		HorrorCorrection.Saturation = 0
+		HorrorCorrection.TintColor =
+			Color3.new(
+				1,
+				1,
+				1
+			)
+	end
+end
+
+local function clearContent()
+	for _, object in ipairs(
+		Content:GetChildren()
+	) do
+		if object:IsA("GuiObject") then
+			object:Destroy()
+		end
+	end
+
+	CameraTargetList = nil
+	table.clear(
+		CameraTargetRows
+	)
+end
+
+local function makeSection(textValue)
+	return new("TextLabel", {
+		Size =
+			UDim2.new(
+				1,
+				-4,
+				0,
+				27
+			),
+		BackgroundTransparency = 1,
+		Text = textValue,
+		TextColor3 =
+			Color3.fromRGB(
+				139,
+				144,
+				157
+			),
+		TextSize = 12,
+		Font =
+			Enum.Font.GothamBold,
+		TextXAlignment =
+			Enum.TextXAlignment.Left,
+		TextYAlignment =
+			Enum.TextYAlignment.Center,
+		Active = false,
+		ZIndex = 5110
+	}, Content)
+end
+
+local function makeToggle(
+	label,
+	key
+)
+	local Holder = new("Frame", {
+		Size =
+			UDim2.new(
+				1,
+				-4,
+				0,
+				50
+			),
+		BackgroundColor3 =
+			Color3.fromRGB(
+				20,
+				21,
+				27
+			),
+		BorderSizePixel = 0,
+		ZIndex = 5110
+	}, Content)
+
+	corner(
+		Holder,
+		9
+	)
+
+	stroke(
+		Holder,
+		Color3.fromRGB(
+			39,
+			41,
+			49
+		),
+		1
+	)
+
+	new("TextLabel", {
+		Size =
+			UDim2.new(
+				1,
+				-90,
+				1,
+				0
+			),
+		Position =
+			UDim2.fromOffset(
+				14,
+				0
+			),
+		BackgroundTransparency = 1,
+		Text = label,
+		TextColor3 =
+			Color3.fromRGB(
+				235,
+				237,
+				242
+			),
+		TextSize = 14,
+		Font =
+			Enum.Font.GothamMedium,
+		TextXAlignment =
+			Enum.TextXAlignment.Left,
+		TextYAlignment =
+			Enum.TextYAlignment.Center,
+		Active = false,
+		ZIndex = 5120
+	}, Holder)
+
+	local Button =
+		new(
+			"TextButton",
+			{
+				Size =
+					UDim2.fromOffset(
+						54,
+						28
+					),
+				Position =
+					UDim2.new(
+						1,
+						-68,
+						0.5,
+						-14
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						37,
+						39,
+						47
+					),
+				BorderSizePixel = 0,
+				Text = "",
+				AutoButtonColor = false,
+				Active = true,
+				ZIndex = 5130
+			},
+			Holder
+		)
+
+	corner(
+		Button,
+		20
+	)
+
+	local Dot =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.fromOffset(
+						22,
+						22
+					),
+				Position =
+					UDim2.fromOffset(
+						3,
+						3
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						150,
+						153,
+						162
+					),
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 5140
+			},
+			Button
+		)
+
+	corner(
+		Dot,
+		20
+	)
+
+	local function update()
+		local enabled =
+			SETTINGS[key]
+
+		Button.BackgroundColor3 =
+			enabled
+			and Color3.fromRGB(
+				55,
+				110,
+				255
+			)
+			or Color3.fromRGB(
+				37,
+				39,
+				47
+			)
+
+		Dot.Position =
+			enabled
+			and UDim2.fromOffset(
+				29,
+				3
+			)
+			or UDim2.fromOffset(
+				3,
+				3
+			)
+
+		Dot.BackgroundColor3 =
+			enabled
+			and Color3.fromRGB(
+				255,
+				255,
+				255
+			)
+			or Color3.fromRGB(
+				150,
+				153,
+				162
+			)
+	end
+
+	Button.Activated:Connect(
+		function()
+			SETTINGS[key] =
+				not SETTINGS[key]
+
+			update()
+
+			if key ==
+				"CustomVFXColor" then
+
+				if SETTINGS.CustomVFXColor then
+					enableVFXColorizer()
+				else
+					disableVFXColorizer()
+				end
+			elseif key ==
+				"WalkSpeed" then
+
+				if SETTINGS.WalkSpeed then
+					enableWalkSpeed()
+				else
+					disableWalkSpeed()
+				end
+			elseif key ==
+				"LowGravity" then
+
+				applyLowGravity()
+			elseif key ==
+				"Instinct" then
+
+				if SETTINGS.Instinct then
+					createInstinctRing()
+					LastInstinctTrigger = 0
+				else
+					destroyInstinctRing()
+				end
+			elseif key ==
+				"CameraLock" then
+
+				if not SETTINGS.CameraLock then
+					restoreCameraLock()
+				end
+			end
+		end
+	)
+
+	update()
+end
+
+local function makeNumber(
+	label,
+	key
+)
+	local Holder =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.new(
+						1,
+						-4,
+						0,
+						56
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						20,
+						21,
+						27
+					),
+				BorderSizePixel = 0,
+				ZIndex = 5110
+			},
+			Content
+		)
+
+	corner(
+		Holder,
+		9
+	)
+
+	stroke(
+		Holder,
+		Color3.fromRGB(
+			39,
+			41,
+			49
+		),
+		1
+	)
+
+	new(
+		"TextLabel",
+		{
+			Size =
+				UDim2.new(
+					1,
+					-130,
+					1,
+					0
+				),
+			Position =
+				UDim2.fromOffset(
+					14,
+					0
+				),
+			BackgroundTransparency = 1,
+			Text = label,
+			TextColor3 =
+				Color3.fromRGB(
+					235,
+					237,
+					242
+				),
+			TextSize = 14,
+			Font =
+				Enum.Font.GothamMedium,
+			TextXAlignment =
+				Enum.TextXAlignment.Left,
+			TextYAlignment =
+				Enum.TextYAlignment.Center,
+			Active = false,
+			ZIndex = 5120
+		},
+		Holder
+	)
+
+	local Box =
+		new(
+			"TextBox",
+			{
+				Size =
+					UDim2.fromOffset(
+						90,
+						34
+					),
+				Position =
+					UDim2.new(
+						1,
+						-104,
+						0.5,
+						-17
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						29,
+						30,
+						37
+					),
+				BorderSizePixel = 0,
+				Text =
+					tostring(
+						SETTINGS[key]
+					),
+				TextColor3 =
+					Color3.fromRGB(
+						245,
+						247,
+						250
+					),
+				PlaceholderColor3 =
+					Color3.fromRGB(
+						100,
+						104,
+						115
+					),
+				TextSize = 14,
+				Font =
+					Enum.Font.GothamMedium,
+				ClearTextOnFocus = false,
+				TextXAlignment =
+					Enum.TextXAlignment.Center,
+				TextYAlignment =
+					Enum.TextYAlignment.Center,
+				Active = true,
+				ZIndex = 5130
+			},
+			Holder
+		)
+
+	corner(
+		Box,
+		8
+	)
+
+	Box.FocusLost:Connect(
+		function()
+			local value =
+				tonumber(
+					Box.Text
+				)
+
+			if value then
+				SETTINGS[key] =
+					value
+
+				if key ==
+					"SpeedValue"
+					and SETTINGS.WalkSpeed then
+
+					updateWalkSpeed()
+				elseif key ==
+					"FOVValue"
+					and SETTINGS.POV then
+
+					applyPOV()
+				end
+
+				Box.Text =
+					tostring(value)
+			else
+				Box.Text =
+					tostring(
+						SETTINGS[key]
+					)
+			end
+		end
+	)
+end
+
+local function makeSlider(
+	label,
+	key,
+	minValue,
+	maxValue
+)
+	local Holder =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.new(
+						1,
+						-4,
+						0,
+						72
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						20,
+						21,
+						27
+					),
+				BorderSizePixel = 0,
+				ZIndex = 5110
+			},
+			Content
+		)
+
+	corner(
+		Holder,
+		9
+	)
+
+	stroke(
+		Holder,
+		Color3.fromRGB(
+			39,
+			41,
+			49
+		),
+		1
+	)
+
+	new(
+		"TextLabel",
+		{
+			Size =
+				UDim2.new(
+					1,
+					-28,
+					0,
+					24
+				),
+			Position =
+				UDim2.fromOffset(
+					14,
+					6
+				),
+			BackgroundTransparency = 1,
+			Text = label,
+			TextColor3 =
+				Color3.fromRGB(
+					235,
+					237,
+					242
+				),
+			TextSize = 14,
+			Font =
+				Enum.Font.GothamMedium,
+			TextXAlignment =
+				Enum.TextXAlignment.Left,
+			TextYAlignment =
+				Enum.TextYAlignment.Center,
+			ZIndex = 5120
+		},
+		Holder
+	)
+
+	local ValueLabel =
+		new(
+			"TextLabel",
+			{
+				Size =
+					UDim2.fromOffset(
+						70,
+						24
+					),
+				Position =
+					UDim2.new(
+						1,
+						-84,
+						0,
+						6
+					),
+				BackgroundTransparency = 1,
+				Text =
+					tostring(
+						math.floor(
+							SETTINGS[key]
+						)
+					),
+				TextColor3 =
+					Color3.fromRGB(
+						170,
+						178,
+						194
+					),
+				TextSize = 12,
+				Font =
+					Enum.Font.GothamBold,
+				TextXAlignment =
+					Enum.TextXAlignment.Right,
+				TextYAlignment =
+					Enum.TextYAlignment.Center,
+				ZIndex = 5120
+			},
+			Holder
+		)
+
+	local Bar =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.new(
+						1,
+						-28,
+						0,
+						8
+					),
+				Position =
+					UDim2.fromOffset(
+						14,
+						46
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						37,
+						39,
+						47
+					),
+				BorderSizePixel = 0,
+				Active = true,
+				ZIndex = 5120
+			},
+			Holder
+		)
+
+	corner(
+		Bar,
+		5
+	)
+
+	local Fill =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.fromScale(
+						0.5,
+						1
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						55,
+						110,
+						255
+					),
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 5121
+			},
+			Bar
+		)
+
+	corner(
+		Fill,
+		5
+	)
+
+	local Knob =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.fromOffset(
+						16,
+						16
+					),
+				AnchorPoint =
+					Vector2.new(
+						0.5,
+						0.5
+					),
+				Position =
+					UDim2.new(
+						0.5,
+						0,
+						0.5,
+						0
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						245,
+						247,
+						250
+					),
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 5122
+			},
+			Bar
+		)
+
+	corner(
+		Knob,
+		20
+	)
+
+	local draggingSlider = false
+
+	local function updateFromX(x)
+		local relative =
+			math.clamp(
+				(
+					x -
+					Bar.AbsolutePosition.X
+				) /
+				math.max(
+					Bar.AbsoluteSize.X,
+					1
+				),
+				0,
+				1
+			)
+
+		local value =
+			math.floor(
+				minValue +
+					(
+						maxValue -
+						minValue
+					) *
+					relative +
+					0.5
+			)
+
+		SETTINGS[key] =
+			value
+
+		Fill.Size =
+			UDim2.new(
+				relative,
+				0,
+				1,
+				0
+			)
+
+		Knob.Position =
+			UDim2.new(
+				relative,
+				0,
+				0.5,
+				0
+			)
+
+		ValueLabel.Text =
+			tostring(value)
+	end
+
+	local function update()
+		local value =
+			math.clamp(
+				tonumber(
+					SETTINGS[key]
+				) or minValue,
+				minValue,
+				maxValue
+			)
+
+		local relative =
+			(
+				value -
+				minValue
+			) /
+			(
+				maxValue -
+				minValue
+			)
+
+		Fill.Size =
+			UDim2.new(
+				relative,
+				0,
+				1,
+				0
+			)
+
+		Knob.Position =
+			UDim2.new(
+				relative,
+				0,
+				0.5,
+				0
+			)
+
+		ValueLabel.Text =
+			tostring(
+				math.floor(value)
+			)
+	end
+
+	Bar.InputBegan:Connect(
+		function(input)
+			if input.UserInputType ==
+				Enum.UserInputType.MouseButton1
+				or input.UserInputType ==
+				Enum.UserInputType.Touch then
+
+				draggingSlider = true
+
+				updateFromX(
+					input.Position.X
+				)
+			end
+		end
+	)
+
+	UserInputService.InputChanged:Connect(
+		function(input)
+			if not draggingSlider then
+				return
+			end
+
+			if input.UserInputType ==
+				Enum.UserInputType.MouseMovement
+				or input.UserInputType ==
+				Enum.UserInputType.Touch then
+
+				updateFromX(
+					input.Position.X
+				)
+			end
+		end
+	)
+
+	UserInputService.InputEnded:Connect(
+		function(input)
+			if input.UserInputType ==
+				Enum.UserInputType.MouseButton1
+				or input.UserInputType ==
+				Enum.UserInputType.Touch then
+
+				draggingSlider = false
+			end
+		end
+	)
+
+	update()
+end
+
+local function makeColorPicker()
+	local Holder =
+		new(
+			"Frame",
+			{
+				Name = "VFXColorPicker",
+				Size =
+					UDim2.new(
+						1,
+						-4,
+						0,
+						360
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						20,
+						21,
+						27
+					),
+				BorderSizePixel = 0,
+				ZIndex = 5110
+			},
+			Content
+		)
+
+	corner(
+		Holder,
+		9
+	)
+
+	stroke(
+		Holder,
+		Color3.fromRGB(
+			39,
+			41,
+			49
+		),
+		1
+	)
+
+	new(
+		"TextLabel",
+		{
+			Size =
+				UDim2.new(
+					1,
+					-28,
+					0,
+					28
+				),
+			Position =
+				UDim2.fromOffset(
+					14,
+					8
+				),
+			BackgroundTransparency = 1,
+			Text = "VFX Color",
+			TextColor3 =
+				Color3.fromRGB(
+					235,
+					237,
+					242
+				),
+			TextSize = 14,
+			Font =
+				Enum.Font.GothamBold,
+			TextXAlignment =
+				Enum.TextXAlignment.Left,
+			TextYAlignment =
+				Enum.TextYAlignment.Center,
+			ZIndex = 5120
+		},
+		Holder
+	)
+
+	local Preview =
+		new(
+			"Frame",
+			{
+				Size =
+					UDim2.fromOffset(
+						54,
+						34
+					),
+				Position =
+					UDim2.fromOffset(
+						14,
+						42
+					),
+				BackgroundColor3 =
+					SETTINGS.VFXColor,
+				BorderSizePixel = 0,
+				ZIndex = 5120
+			},
+			Holder
+		)
+
+	corner(
+		Preview,
+		8
+	)
+
+	stroke(
+		Preview,
+		Color3.fromRGB(
+			70,
+			73,
+			83
+		),
+		1
+	)
+
+	local Hex =
+		new(
+			"TextLabel",
+			{
+				Size =
+					UDim2.new(
+						1,
+						-85,
+						0,
+						34
+					),
+				Position =
+					UDim2.fromOffset(
+						78,
+						42
+					),
+				BackgroundTransparency = 1,
+				Text =
+					"#" ..
+					SETTINGS.VFXColor:
+						ToHex():
+						upper(),
+				TextColor3 =
+					Color3.fromRGB(
+						205,
+						210,
+						220
+					),
+				TextSize = 12,
+				Font =
+					Enum.Font.GothamBold,
+				TextXAlignment =
+					Enum.TextXAlignment.Left,
+				TextYAlignment =
+					Enum.TextYAlignment.Center,
+				ZIndex = 5120
+			},
+			Holder
+		)
+
+	new(
+		"TextLabel",
+		{
+			Size =
+				UDim2.new(
+					1,
+					-28,
+					0,
+					24
+				),
+			Position =
+				UDim2.fromOffset(
+					14,
+					84
+				),
+			BackgroundTransparency = 1,
+			Text = "PRESET COLORS",
+			TextColor3 =
+				Color3.fromRGB(
+					139,
+					144,
+					157
+				),
+			TextSize = 11,
+			Font =
+				Enum.Font.GothamBold,
+			TextXAlignment =
+				Enum.TextXAlignment.Left,
+			TextYAlignment =
+				Enum.TextYAlignment.Center,
+			Active = false,
+			ZIndex = 5120
+		},
+		Holder
+	)
+
+	local Presets =
+		new(
+			"ScrollingFrame",
+			{
+				Name = "PresetColors",
+				Size =
+					UDim2.new(
+						1,
+						-28,
+						0,
+						255
+					),
+				Position =
+					UDim2.fromOffset(
+						14,
+						112
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						16,
+						17,
+						22
+					),
+				BorderSizePixel = 0,
+				ScrollBarThickness = 4,
+				ScrollBarImageColor3 =
+					Color3.fromRGB(
+						90,
+						95,
+						110
+					),
+				CanvasSize =
+					UDim2.new(),
+				AutomaticCanvasSize =
+					Enum.AutomaticSize.Y,
+				ScrollingDirection =
+					Enum.ScrollingDirection.Y,
+				Active = true,
+				ZIndex = 5120
+			},
+			Holder
+		)
+
+	corner(
+		Presets,
+		8
+	)
+
+	new(
+		"UIPadding",
+		{
+			PaddingTop =
+				UDim.new(
+					0,
+					8
+				),
+			PaddingBottom =
+				UDim.new(
+					0,
+					8
+				),
+			PaddingLeft =
+				UDim.new(
+					0,
+					8
+				),
+			PaddingRight =
+				UDim.new(
+					0,
+					8
+				)
+		},
+		Presets
+	)
+
+	new(
+		"UIGridLayout",
+		{
+			CellSize =
+				UDim2.fromOffset(
+					76,
+					36
+				),
+			CellPadding =
+				UDim2.fromOffset(
+					6,
+					6
+				),
+			FillDirection =
+				Enum.FillDirection.Horizontal,
+			FillDirectionMaxCells = 5,
+			HorizontalAlignment =
+				Enum.HorizontalAlignment.Center,
+			SortOrder =
+				Enum.SortOrder.LayoutOrder
+		},
+		Presets
+	)
+
+	local colors = {
+		{"Red", Color3.fromRGB(255,45,45)},
+		{"Crimson", Color3.fromRGB(220,20,60)},
+		{"Scarlet", Color3.fromRGB(255,70,25)},
+		{"Orange", Color3.fromRGB(255,140,30)},
+		{"Amber", Color3.fromRGB(255,190,45)},
+		{"Gold", Color3.fromRGB(255,215,0)},
+		{"Yellow", Color3.fromRGB(255,240,50)},
+		{"Lime", Color3.fromRGB(170,255,45)},
+		{"Green", Color3.fromRGB(55,210,90)},
+		{"Emerald", Color3.fromRGB(30,190,120)},
+		{"Mint", Color3.fromRGB(70,255,180)},
+		{"Teal", Color3.fromRGB(25,200,190)},
+		{"Cyan", Color3.fromRGB(35,230,255)},
+		{"Sky", Color3.fromRGB(65,180,255)},
+		{"Blue", Color3.fromRGB(55,110,255)},
+		{"Royal Blue", Color3.fromRGB(70,80,220)},
+		{"Navy", Color3.fromRGB(25,45,120)},
+		{"Azure", Color3.fromRGB(30,145,255)},
+		{"Indigo", Color3.fromRGB(85,55,210)},
+		{"Purple", Color3.fromRGB(145,70,255)},
+		{"Violet", Color3.fromRGB(175,65,245)},
+		{"Magenta", Color3.fromRGB(235,55,220)},
+		{"Pink", Color3.fromRGB(255,80,175)},
+		{"Rose", Color3.fromRGB(255,90,135)},
+		{"Hot Pink", Color3.fromRGB(255,40,145)},
+		{"White", Color3.fromRGB(255,255,255)},
+		{"Silver", Color3.fromRGB(190,195,205)},
+		{"Light Gray", Color3.fromRGB(155,160,170)},
+		{"Gray", Color3.fromRGB(105,110,120)},
+		{"Dark Gray", Color3.fromRGB(65,68,75)},
+		{"Black", Color3.fromRGB(8,9,12)},
+		{"Light Blue", Color3.fromRGB(140,205,255)},
+		{"Light Purple", Color3.fromRGB(200,150,255)},
+		{"Light Pink", Color3.fromRGB(255,170,210)},
+		{"Light Green", Color3.fromRGB(145,255,165)},
+		{"Light Yellow", Color3.fromRGB(255,250,160)},
+		{"Brown", Color3.fromRGB(125,75,40)},
+		{"Tan", Color3.fromRGB(205,165,115)},
+		{"Copper", Color3.fromRGB(185,95,55)},
+		{"Bronze", Color3.fromRGB(150,105,55)},
+		{"Coral", Color3.fromRGB(255,105,90)},
+		{"Salmon", Color3.fromRGB(255,135,125)},
+		{"Peach", Color3.fromRGB(255,185,145)},
+		{"Lavender", Color3.fromRGB(190,175,255)},
+		{"Periwinkle", Color3.fromRGB(135,150,255)},
+		{"Ice", Color3.fromRGB(180,240,255)},
+		{"Aqua", Color3.fromRGB(70,255,235)},
+		{"Neon Green", Color3.fromRGB(90,255,70)},
+		{"Neon Orange", Color3.fromRGB(255,95,20)},
+		{"Neon Purple", Color3.fromRGB(190,50,255)}
+	}
+
+	for index, entry in ipairs(colors) do
+		local name = entry[1]
+		local color = entry[2]
+
+		local button =
+			new(
+				"TextButton",
+				{
+					Name =
+						name:gsub(
+							"%s+",
+							""
+						),
+					LayoutOrder = index,
+					BackgroundColor3 =
+						color,
+					BorderSizePixel = 0,
+					Text = name,
+					TextColor3 =
+						Color3.fromRGB(
+							255,
+							255,
+							255
+						),
+					TextSize = 10,
+					Font =
+						Enum.Font.GothamBold,
+					TextStrokeTransparency =
+						0.45,
+					AutoButtonColor = false,
+					Active = true,
+					ZIndex = 5130
+				},
+				Presets
+			)
+
+		corner(
+			button,
+			7
+		)
+
+		local overlay =
+			new(
+				"Frame",
+				{
+					Size =
+						UDim2.fromScale(
+							1,
+							1
+						),
+					BackgroundColor3 =
+						Color3.fromRGB(
+							0,
+							0,
+							0
+						),
+					BackgroundTransparency =
+						0.82,
+					BorderSizePixel = 0,
+					Active = false,
+					ZIndex = 5131
+				},
+				button
+			)
+
+		corner(
+			overlay,
+			7
+		)
+
+		new(
+			"TextLabel",
+			{
+				Size =
+					UDim2.fromScale(
+						1,
+						1
+					),
+				BackgroundTransparency = 1,
+				Text = name,
+				TextColor3 =
+					Color3.fromRGB(
+						255,
+						255,
+						255
+					),
+				TextSize = 10,
+				Font =
+					Enum.Font.GothamBold,
+				TextXAlignment =
+					Enum.TextXAlignment.Center,
+				TextYAlignment =
+					Enum.TextYAlignment.Center,
+				Active = false,
+				ZIndex = 5132
+			},
+			button
+		)
+
+		button.Activated:Connect(
+			function()
+				SETTINGS.VFXColor =
+					color
+
+				Preview.BackgroundColor3 =
+					color
+
+				Hex.Text =
+					"#" ..
+					color:ToHex():upper()
+
+				updateVFXColor()
+			end
+		)
+	end
+end
+
+local function refreshCameraTargetList()
+	if not CameraTargetList then
+		return
+	end
+
+	for _, object in ipairs(
+		CameraTargetList:GetChildren()
+	) do
+		if object:IsA("GuiButton") then
+			object:Destroy()
+		end
+	end
+
+	table.clear(
+		CameraTargetRows
+	)
+
+	local nearestButton =
+		new(
+			"TextButton",
+			{
+				Name =
+					"NearestPlayer",
+				Size =
+					UDim2.new(
+						1,
+						-6,
+						0,
+						46
+					),
+				BackgroundColor3 =
+					CameraLockTarget == nil
+					and Color3.fromRGB(
+						47,
+						89,
+						190
+					)
+					or Color3.fromRGB(
+						25,
+						26,
+						32
+					),
+				BorderSizePixel = 0,
+				Text =
+					"Nearest Player",
+				TextColor3 =
+					Color3.fromRGB(
+						245,
+						247,
+						250
+					),
+				TextSize = 13,
+				Font =
+					Enum.Font.GothamBold,
+				TextXAlignment =
+					Enum.TextXAlignment.Left,
+				AutoButtonColor = false,
+				Active = true,
+				ZIndex = 5140
+			},
+			CameraTargetList
+		)
+
+	corner(
+		nearestButton,
+		8
+	)
+
+	new(
+		"UIPadding",
+		{
+			PaddingLeft =
+				UDim.new(
+					0,
+					12
+				)
+		},
+		nearestButton
+	)
+
+	nearestButton.Activated:Connect(
+		function()
+			CameraLockTarget = nil
+			refreshCameraTargetList()
+		end
+	)
+
+	for _, player in ipairs(
+		Players:GetPlayers()
+	) do
+		if player ~= LocalPlayer then
+			local row =
+				new(
+					"TextButton",
+					{
+						Name =
+							"Player_" ..
+							player.UserId,
+						Size =
+							UDim2.new(
+								1,
+								-6,
+								0,
+								52
+							),
+						BackgroundColor3 =
+							CameraLockTarget ==
+							player
+							and Color3.fromRGB(
+								47,
+								89,
+								190
+							)
+							or Color3.fromRGB(
+								25,
+								26,
+								32
+							),
+						BorderSizePixel = 0,
+						Text = "",
+						AutoButtonColor = false,
+						Active = true,
+						ZIndex = 5140
+					},
+					CameraTargetList
+				)
+
+			corner(
+				row,
+				8
+			)
+
+			local avatarImage =
+				new(
+					"ImageLabel",
+					{
+						Name = "Avatar",
+						Size =
+							UDim2.fromOffset(
+								40,
+								40
+							),
+						Position =
+							UDim2.fromOffset(
+								6,
+								6
+							),
+						BackgroundColor3 =
+							Color3.fromRGB(
+								31,
+								33,
+								40
+							),
+						BorderSizePixel = 0,
+						Image =
+							"rbxasset://textures/ui/GuiImagePlaceholder.png",
+						ScaleType =
+							Enum.ScaleType.Crop,
+						Active = false,
+						ZIndex = 5142
+					},
+					row
+				)
+
+			corner(
+				avatarImage,
+				7
+			)
+
+			new(
+				"TextLabel",
+				{
+					Size =
+						UDim2.new(
+							1,
+							-60,
+							0,
+							22
+						),
+					Position =
+						UDim2.fromOffset(
+							55,
+							5
+						),
+					BackgroundTransparency = 1,
+					Text =
+						player.DisplayName,
+					TextColor3 =
+						isTeammate(
+							player
+						)
+						and Color3.fromRGB(
+							115,
+							120,
+							132
+						)
+						or Color3.fromRGB(
+							235,
+							237,
+							242
+						),
+					TextSize = 13,
+					Font =
+						Enum.Font.GothamBold,
+					TextXAlignment =
+						Enum.TextXAlignment.Left,
+					TextYAlignment =
+						Enum.TextYAlignment.Center,
+					Active = false,
+					ZIndex = 5142
+				},
+				row
+			)
+
+			new(
+				"TextLabel",
+				{
+					Size =
+						UDim2.new(
+							1,
+							-60,
+							0,
+							18
+						),
+					Position =
+						UDim2.fromOffset(
+							55,
+							27
+						),
+					BackgroundTransparency = 1,
+					Text =
+						"@" ..
+						player.Name,
+					TextColor3 =
+						Color3.fromRGB(
+							135,
+							140,
+							153
+						),
+					TextSize = 10,
+					Font =
+						Enum.Font.GothamMedium,
+					TextXAlignment =
+						Enum.TextXAlignment.Left,
+					TextYAlignment =
+						Enum.TextYAlignment.Center,
+					Active = false,
+					ZIndex = 5142
+				},
+				row
+			)
+
+			row.Activated:Connect(
+				function()
+					CameraLockTarget =
+						player
+
+					refreshCameraTargetList()
+				end
+			)
+
+			CameraTargetRows[player] =
+				row
+
+			task.spawn(
+				function()
+					local success, image =
+						pcall(
+							function()
+								return Players:GetUserThumbnailAsync(
+									player.UserId,
+									Enum.ThumbnailType.AvatarBust,
+									Enum.ThumbnailSize.Size150x150
+								)
+							end
+						)
+
+					if success
+						and image
+						and row.Parent then
+
+						avatarImage.Image =
+							image
+					end
+				end
+			)
+		end
+	end
+end
+
+local function makeCameraTargetList()
+	local Holder =
+		new(
+			"Frame",
+			{
+				Name =
+					"TargetListHolder",
+				Size =
+					UDim2.new(
+						1,
+						-4,
+						0,
+						205
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						20,
+						21,
+						27
+					),
+				BorderSizePixel = 0,
+				ZIndex = 5110
+			},
+			Content
+		)
+
+	corner(
+		Holder,
+		9
+	)
+
+	stroke(
+		Holder,
+		Color3.fromRGB(
+			39,
+			41,
+			49
+		),
+		1
+	)
+
+	CameraTargetList =
+		new(
+			"ScrollingFrame",
+			{
+				Name = "TargetList",
+				Size =
+					UDim2.new(
+						1,
+						-12,
+						1,
+						-12
+					),
+				Position =
+					UDim2.fromOffset(
+						6,
+						6
+					),
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				ScrollBarThickness = 3,
+				ScrollBarImageColor3 =
+					Color3.fromRGB(
+						100,
+						105,
+						120
+					),
+				CanvasSize =
+					UDim2.new(),
+				AutomaticCanvasSize =
+					Enum.AutomaticSize.Y,
+				ScrollingDirection =
+					Enum.ScrollingDirection.Y,
+				Active = true,
+				ZIndex = 5120
+			},
+			Holder
+		)
+
+	new(
+		"UIListLayout",
+		{
+			FillDirection =
+				Enum.FillDirection.Vertical,
+			HorizontalAlignment =
+				Enum.HorizontalAlignment.Center,
+			SortOrder =
+				Enum.SortOrder.LayoutOrder,
+			Padding =
+				UDim.new(
+					0,
+					5
+				)
+		},
+		CameraTargetList
+	)
+
+	refreshCameraTargetList()
+end
+
+local function buildESP()
+	clearContent()
+
+	makeSection(
+		"PLAYER ESP"
+	)
+
+	makeToggle(
+		"Names",
+		"Names"
+	)
+
+	makeToggle(
+		"Distance",
+		"Distance"
+	)
+
+	makeToggle(
+		"Health",
+		"Health"
+	)
+
+	makeToggle(
+		"Boxes",
+		"Boxes"
+	)
+
+	makeToggle(
+		"Outline",
+		"Outline"
+	)
+
+	makeToggle(
+		"Skeleton",
+		"Skeleton"
+	)
+
+	makeToggle(
+		"Lines",
+		"Lines"
+	)
+
+	makeToggle(
+		"Ignore Teammates",
+		"IgnoreTeammates"
+	)
+
+	makeToggle(
+		"NPC ESP",
+		"NPCESP"
+	)
+
+	makeSection(
+		"FUN"
+	)
+
+	makeToggle(
+		"Instinct",
+		"Instinct"
+	)
+
+	makeSlider(
+		"Instinct Zone Size",
+		"InstinctRadius",
+		5,
+		30
+	)
+
+	makeToggle(
+		"Low Gravity",
+		"LowGravity"
+	)
+
+	makeToggle(
+		"Spin",
+		"Spin"
+	)
+
+	makeNumber(
+		"Spin Speed",
+		"SpinSpeedValue"
+	)
+end
+
+local function buildFX()
+	clearContent()
+
+	makeSection(
+		"SCREEN EFFECTS"
+	)
+
+	makeToggle(
+		"Vignette",
+		"Vignette"
+	)
+
+	makeToggle(
+		"Low Health Effect",
+		"LowHealth"
+	)
+
+	makeToggle(
+		"Damage Flash",
+		"DamageFX"
+	)
+
+	makeToggle(
+		"Motion Blur",
+		"MotionBlur"
+	)
+
+	makeToggle(
+		"Color Boost",
+		"ColorBoost"
+	)
+
+	makeToggle(
+		"Colorful VFX",
+		"ColorfulVFX"
+	)
+
+	makeToggle(
+		"Extreme Colors",
+		"ExtremeColors"
+	)
+
+	makeToggle(
+		"Extreme Extreme Colors",
+		"ExtremeExtremeColors"
+	)
+
+	makeToggle(
+		"Night Mode",
+		"NightMode"
+	)
+
+	makeToggle(
+		"Horror Mode",
+		"HorrorMode"
+	)
+
+	makeSection(
+		"GAME VFX"
+	)
+
+	makeToggle(
+		"VFX Colorizer",
+		"CustomVFXColor"
+	)
+
+	makeColorPicker()
+
+	makeSection(
+		"VFX QUALITY"
+	)
+
+	makeToggle(
+		"Reduced Motion",
+		"ReducedMotion"
+	)
+end
+
+local function buildMovement()
+	clearContent()
+
+	makeSection(
+		"MOVEMENT"
+	)
+
+	makeToggle(
+		"Walk Speed",
+		"WalkSpeed"
+	)
+
+	makeNumber(
+		"Speed",
+		"SpeedValue"
+	)
+
+	makeToggle(
+		"Infinite Jump",
+		"InfiniteJump"
+	)
+
+	makeSection(
+		"CAMERA"
+	)
+
+	makeToggle(
+		"POV / FOV",
+		"POV"
+	)
+
+	makeNumber(
+		"Field of View",
+		"FOVValue"
+	)
+
+	makeToggle(
+		"Camera Lock",
+		"CameraLock"
+	)
+
+	makeSection(
+		"TARGET PLAYER"
+	)
+
+	makeCameraTargetList()
+end
+
+local function selectTab(name)
+	for tabName, button in pairs(
+		TabButtons
+	) do
+		if tabName == name then
+			button.BackgroundColor3 =
+				Color3.fromRGB(
+					47,
+					89,
+					190
+				)
+
+			button.TextColor3 =
+				Color3.fromRGB(
+					255,
+					255,
+					255
+				)
+		else
+			button.BackgroundColor3 =
+				Color3.fromRGB(
+					25,
+					26,
+					32
+				)
+
+			button.TextColor3 =
+				Color3.fromRGB(
+					150,
+					154,
+					165
+				)
+		end
+	end
+
+	if name == "ESP" then
+		buildESP()
+	elseif name == "FX" then
+		buildFX()
+	elseif name == "MOVEMENT" then
+		buildMovement()
+	end
+end
+
+TabButtons.ESP.Activated:Connect(
+	function()
+		selectTab("ESP")
+	end
+)
+
+TabButtons.FX.Activated:Connect(
+	function()
+		selectTab("FX")
+	end
+)
+
+TabButtons.MOVEMENT.Activated:Connect(
+	function()
+		selectTab("MOVEMENT")
+	end
+)
+
+local function updateResponsiveScale()
+	local viewport =
+		getViewportSize()
+
+	if viewport.X <= 0
+		or viewport.Y <= 0 then
+
+		return
+	end
+
+	local panelScale =
+		math.clamp(
+			math.min(
+				viewport.X / 700,
+				viewport.Y / 700
+			),
+			0.68,
+			1.12
+		)
+
+	if UserInputService.TouchEnabled
+		and not UserInputService.KeyboardEnabled then
+
+		panelScale =
+			math.clamp(
+				panelScale * 1.03,
+				0.68,
+				1.12
+			)
+	end
+
+	MainScale.Scale =
+		panelScale
+
+	OpenButtonScale.Scale =
+		math.clamp(
+			math.min(
+				viewport.X / 800,
+				viewport.Y / 800
+			),
+			0.82,
+			1.15
+		)
+end
+
+local function connectCameraScaling()
+	if currentCameraConnection then
+		currentCameraConnection:Disconnect()
+		currentCameraConnection = nil
+	end
+
+	local camera =
+		getCamera()
+
+	if camera then
+		currentCameraConnection =
+			camera:GetPropertyChangedSignal(
+				"ViewportSize"
+			):Connect(
+				updateResponsiveScale
+			)
+	end
+
+	updateResponsiveScale()
+end
+
+workspace:GetPropertyChangedSignal(
+	"CurrentCamera"
+):Connect(
+	function()
+		connectCameraScaling()
+
+		if SETTINGS.CameraLock then
+			CameraLockAutoRotateSaved = nil
+			CameraLockCameraTypeSaved = nil
+			CameraLockCameraSubjectSaved = nil
+		end
+	end
+)
+
+connectCameraScaling()
+
+local function setPanelVisible(
+	value
+)
+	Main.Visible = value
+	OpenButton.Visible = not value
+
+	updateResponsiveScale()
+
+	if value then
+		local finalSize =
+			UDim2.fromOffset(
+				470,
+				550
+			)
+
+		local finalPosition =
+			Main.Position
+
+		Main.Size =
+			UDim2.fromOffset(
+				430,
+				510
+			)
+
+		Main.Position =
+			UDim2.new(
+				0.5,
+				-215,
+				0.5,
+				-255
+			)
+
+		TweenService:Create(
+			Main,
+			TweenInfo.new(
+				0.3,
+				Enum.EasingStyle.Quint,
+				Enum.EasingDirection.Out
+			),
+			{
+				Size = finalSize,
+				Position = finalPosition
+			}
+		):Play()
+	end
+end
+
+OpenButton.Activated:Connect(
+	function()
+		setPanelVisible(true)
+	end
+)
+
+Close.Activated:Connect(
+	function()
+		setPanelVisible(false)
+	end
+)
+
+Header.InputBegan:Connect(
+	function(input)
+		if input.UserInputType ~=
+			Enum.UserInputType.MouseButton1
+			and input.UserInputType ~=
+			Enum.UserInputType.Touch then
+
+			return
+		end
+
+		draggingMain = true
+		dragStart =
+			input.Position
+
+		startPos =
+			Main.Position
+	end
+)
+
+UserInputService.InputChanged:Connect(
+	function(input)
+		if not draggingMain then
+			return
+		end
+
+		if input.UserInputType ~=
+			Enum.UserInputType.MouseMovement
+			and input.UserInputType ~=
+			Enum.UserInputType.Touch then
+
+			return
+		end
+
+		local delta =
+			input.Position -
+			dragStart
+
+		Main.Position =
+			UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset +
+					delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset +
+					delta.Y
+			)
+	end
+)
+
+UserInputService.InputEnded:Connect(
+	function(input)
+		if input.UserInputType ==
+			Enum.UserInputType.MouseButton1
+			or input.UserInputType ==
+			Enum.UserInputType.Touch then
+
+			draggingMain = false
+		end
+	end
+)
+
+for _, player in ipairs(
+	Players:GetPlayers()
+) do
+	if player ~= LocalPlayer then
+		createESP(
+			player,
+			true
+		)
+
+		player.CharacterAdded:Connect(
+			function(character)
+				task.spawn(
+					function()
+						character:WaitForChild(
+							"HumanoidRootPart",
+							5
+						)
+
+						character:WaitForChild(
+							"Humanoid",
+							5
+						)
+
+						task.wait(
+							0.05
+						)
+
+						if EspObjects[player] then
+							updateESP(
+								player
+							)
+						end
+					end
+				)
+			end
+		)
+	end
+end
+
+Players.PlayerAdded:Connect(
+	function(player)
+		if player == LocalPlayer then
+			return
+		end
+
+		createESP(
+			player,
+			true
+		)
+
+		player.CharacterAdded:Connect(
+			function(character)
+				task.spawn(
+					function()
+						character:WaitForChild(
+							"HumanoidRootPart",
+							5
+						)
+
+						character:WaitForChild(
+							"Humanoid",
+							5
+						)
+
+						task.wait(
+							0.05
+						)
+
+						if EspObjects[player] then
+							updateESP(
+								player
+							)
+						end
+					end
+				)
+			end
+		)
+
+		task.defer(
+			function()
+				refreshCameraTargetList()
+			end
+		)
+	end
+)
+
+Players.PlayerRemoving:Connect(
+	function(player)
+		destroyESP(player)
+
+		if CameraLockTarget ==
+			player then
+
+			CameraLockTarget = nil
+		end
+
+		refreshCameraTargetList()
+	end
+)
+
+LocalPlayer.CharacterAdded:Connect(
+	function(character)
+		CameraLockAutoRotateSaved = nil
+		CameraLockCameraTypeSaved = nil
+		CameraLockCameraSubjectSaved = nil
+
+		task.wait(
+			0.2
+		)
+
+		connectHealth(
+			character
+		)
+
+		if SETTINGS.WalkSpeed then
+			enableWalkSpeed()
+		end
+	end
+)
+
+if LocalPlayer.Character then
+	task.defer(
+		function()
+			connectHealth(
+				LocalPlayer.Character
+			)
+
+			if SETTINGS.WalkSpeed then
+				enableWalkSpeed()
+			end
+		end
+	)
+end
+
+UserInputService.JumpRequest:Connect(
+	function()
+		if not SETTINGS.InfiniteJump then
+			return
+		end
+
+		local character =
+			LocalPlayer.Character
+
+		local humanoid =
+			getHumanoid(character)
+
+		if not humanoid
+			or humanoid.Health <= 0 then
+
+			return
+		end
+
+		humanoid.Jump = true
+
+		humanoid:ChangeState(
+			Enum.HumanoidStateType.Jumping
+		)
+	end
+)
+
+RunService:BindToRenderStep(
+	"ESP_SYSTEM_UPDATE",
+	Enum.RenderPriority.Camera.Value + 1,
+	function(deltaTime)
+		pcall(
+			applyPOV
+		)
+
+		pcall(
+			updateWalkSpeed
+		)
+
+		pcall(
+			applyLowGravity
+		)
+
+		pcall(
+			applySpin,
+			deltaTime
+		)
+
+		pcall(
+			applyCameraLock
+		)
+
+		pcall(
+			updateAllESP
+		)
+
+		pcall(
+			updateScreenFX
+		)
+
+		pcall(
+			updateInstinctRing
+		)
+
+		if SETTINGS.Instinct then
+			pcall(
+				triggerInstinct
+			)
+		end
+	end
+)
+
+local function getCreatorAvatar()
+	local success, userId =
+		pcall(
+			function()
+				return Players:GetUserIdFromNameAsync(
+					"Twitterboy_112"
+				)
+			end
+		)
+
+	if not success
+		or not userId then
+
+		return nil
+	end
+
+	local success2, image =
+		pcall(
+			function()
+				return Players:GetUserThumbnailAsync(
+					userId,
+					Enum.ThumbnailType.AvatarBust,
+					Enum.ThumbnailSize.Size420x420
+				)
+			end
+		)
+
+	if success2
+		and image then
+
+		return image
+	end
+
+	return
+		"rbxthumb://type=AvatarBust&id="
+		.. tostring(userId)
+		.. "&w=420&h=420"
+end
+
+local function playCreatorIntro()
+	local Intro =
+		new(
+			"Frame",
+			{
+				Name = "CreatorIntro",
+				Size =
+					UDim2.fromScale(
+						1,
+						1
+					),
+				Position =
+					UDim2.fromScale(
+						0,
+						0
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						3,
+						4,
+						7
+					),
+				BackgroundTransparency = 0,
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 10000
+			},
+			Gui
+		)
+
+	local Stage =
+		new(
+			"Frame",
+			{
+				Name =
+					"CenteredStage",
+				Size =
+					UDim2.fromOffset(
+						900,
+						850
+					),
+				Position =
+					UDim2.fromScale(
+						0.5,
+						0.5
+					),
+				AnchorPoint =
+					Vector2.new(
+						0.5,
+						0.5
+					),
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				Active = false,
+				ZIndex = 10010
+			},
+			Intro
+		)
+
+	local StageScale =
+		new(
+			"UIScale",
+			{
+				Scale = 1
+			},
+			Stage
+		)
+
+	local function updateIntroScale()
+		local viewport =
+			getViewportSize()
+
+		if viewport.X <= 0
+			or viewport.Y <= 0 then
+
+			return
+		end
+
+		local scale =
+			math.min(
+				viewport.X / 900,
+				viewport.Y / 850
+			)
+
+		StageScale.Scale =
+			math.clamp(
+				scale,
+				0.55,
+				1
+			)
+	end
+
+	updateIntroScale()
+
+	local cameraConnection
+
+	if workspace.CurrentCamera then
+		cameraConnection =
+			workspace.CurrentCamera:
+				GetPropertyChangedSignal(
+					"ViewportSize"
+				):
+				Connect(
+					updateIntroScale
+				)
+	end
+
+	local CenterX = 0.5
+	local CenterY = 0.5
+
+	local Glow =
+		new(
+			"ImageLabel",
+			{
+				Size =
+					UDim2.fromOffset(
+						520,
+						520
+					),
+				Position =
+					UDim2.new(
+						CenterX,
+						-260,
+						CenterY,
+						-260
+					),
+				BackgroundTransparency = 1,
+				Image =
+					"rbxassetid://4996891970",
+				ImageColor3 =
+					Color3.fromRGB(
+						75,
+						105,
+						190
+					),
+				ImageTransparency = 0.9,
+				ZIndex = 10020
+			},
+			Stage
+		)
+
+	local CoreGlow =
+		new(
+			"ImageLabel",
+			{
+				Size =
+					UDim2.fromOffset(
+						330,
+						330
+					),
+				Position =
+					UDim2.new(
+						CenterX,
+						-165,
+						CenterY,
+						-165
+					),
+				BackgroundTransparency = 1,
+				Image =
+					"rbxassetid://4996891970",
+				ImageColor3 =
+					Color3.fromRGB(
+						120,
+						145,
+						255
+					),
+				ImageTransparency = 0.92,
+				ZIndex = 10030
+			},
+			Stage
+		)
+
+	local Ring3 =
+		new(
+			"Frame",
+			{
+				Name =
+					"WhiteCircle3",
+				Size =
+					UDim2.fromOffset(
+						470,
+						470
+					),
+				Position =
+					UDim2.new(
+						CenterX,
+						-235,
+						CenterY,
+						-235
+					),
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				ZIndex = 10040
+			},
+			Stage
+		)
+
+	corner(
+		Ring3,
+		240
+	)
+
+	stroke(
+		Ring3,
+		Color3.fromRGB(
+			190,
+			200,
+			230
+		),
+		1,
+		0.78
+	)
+
+	local Ring2 =
+		new(
+			"Frame",
+			{
+				Name =
+					"WhiteCircle2",
+				Size =
+					UDim2.fromOffset(
+						410,
+						410
+					),
+				Position =
+					UDim2.new(
+						CenterX,
+						-205,
+						CenterY,
+						-205
+					),
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				ZIndex = 10050
+			},
+			Stage
+		)
+
+	corner(
+		Ring2,
+		220
+	)
+
+	stroke(
+		Ring2,
+		Color3.fromRGB(
+			220,
+			226,
+			245
+		),
+		1.5,
+		0.5
+	)
+
+	local Ring1 =
+		new(
+			"Frame",
+			{
+				Name =
+					"WhiteCircle1",
+				Size =
+					UDim2.fromOffset(
+						350,
+						350
+					),
+				Position =
+					UDim2.new(
+						CenterX,
+						-175,
+						CenterY,
+						-175
+					),
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				ZIndex = 10060
+			},
+			Stage
+		)
+
+	corner(
+		Ring1,
+		200
+	)
+
+	stroke(
+		Ring1,
+		Color3.fromRGB(
+			245,
+			247,
+			255
+		),
+		2,
+		0.2
+	)
+
+	local Avatar =
+		new(
+			"ImageLabel",
+			{
+				Size =
+					UDim2.fromOffset(
+						300,
+						300
+					),
+				Position =
+					UDim2.new(
+						CenterX,
+						-150,
+						CenterY,
+						-150
+					),
+				BackgroundColor3 =
+					Color3.fromRGB(
+						14,
+						15,
+						21
+					),
+				BackgroundTransparency = 0,
+				ImageTransparency = 1,
+				ScaleType =
+					Enum.ScaleType.Crop,
+				ZIndex = 10070
+			},
+			Stage
+		)
+
+	corner(
+		Avatar,
+		200
+	)
+
+	local AvatarStroke =
+		stroke(
+			Avatar,
+			Color3.fromRGB(
+				245,
+				247,
+				255
+			),
+			2,
+			1
+		)
+
+	local Credit =
+		new(
+			"TextLabel",
+			{
+				Name =
+					"CreatorCredit",
+				Size =
+					UDim2.new(
+						0,
+						900,
+						0,
+						100
+					),
+				Position =
+					UDim2.new(
+						CenterX,
+						-450,
+						CenterY,
+						-390
+					),
+				BackgroundTransparency = 1,
+				Text =
+					"by twitterboy_112",
+				TextColor3 =
+					Color3.fromRGB(
+						255,
+						255,
+						255
+					),
+				TextTransparency = 1,
+				TextSize = 48,
+				Font =
+					Enum.Font.GothamBold,
+				TextXAlignment =
+					Enum.TextXAlignment.Center,
+				TextYAlignment =
+					Enum.TextYAlignment.Center,
+				Active = false,
+				ZIndex = 30000
+			},
+			Stage
+		)
+
+	local CreditStroke =
+		stroke(
+			Credit,
+			Color3.fromRGB(
+				95,
+				115,
+				180
+			),
+			2,
+			0.9
+		)
+
+	local avatarImage =
+		getCreatorAvatar()
+
+	if avatarImage then
+		Avatar.Image =
+			avatarImage
+
+		pcall(
+			function()
+				ContentProvider:PreloadAsync({
+					Avatar
+				})
+			end
+		)
+	end
+
+	TweenService:Create(
+		Ring3,
+		TweenInfo.new(
+			1.15,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			Size =
+				UDim2.fromOffset(
+					500,
+					500
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-250,
+					CenterY,
+					-250
+				)
+		}
+	):Play()
+
+	TweenService:Create(
+		Ring2,
+		TweenInfo.new(
+			1,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			Size =
+				UDim2.fromOffset(
+					445,
+					445
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-222.5,
+					CenterY,
+					-222.5
+				)
+		}
+	):Play()
+
+	TweenService:Create(
+		Ring1,
+		TweenInfo.new(
+			0.9,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			Size =
+				UDim2.fromOffset(
+					365,
+					365
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-182.5,
+					CenterY,
+					-182.5
+				)
+		}
+	):Play()
+
+	TweenService:Create(
+		Avatar,
+		TweenInfo.new(
+			1.05,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			Size =
+				UDim2.fromOffset(
+					315,
+					315
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-157.5,
+					CenterY,
+					-157.5
+				),
+			ImageTransparency = 0
+		}
+	):Play()
+
+	TweenService:Create(
+		AvatarStroke,
+		TweenInfo.new(
+			0.9,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			Transparency = 0.05
+		}
+	):Play()
+
+	TweenService:Create(
+		Glow,
+		TweenInfo.new(
+			1.2,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			ImageTransparency = 0.58,
+			Size =
+				UDim2.fromOffset(
+					680,
+					680
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-340,
+					CenterY,
+					-340
+				)
+		}
+	):Play()
+
+	TweenService:Create(
+		CoreGlow,
+		TweenInfo.new(
+			1,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			ImageTransparency = 0.6,
+			Size =
+				UDim2.fromOffset(
+					430,
+					430
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-215,
+					CenterY,
+					-215
+				)
+		}
+	):Play()
+
+	task.wait(
+		0.85
+	)
+
+	TweenService:Create(
+		Credit,
+		TweenInfo.new(
+			0.7,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			TextTransparency = 0
+		}
+	):Play()
+
+	TweenService:Create(
+		CreditStroke,
+		TweenInfo.new(
+			0.7,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		),
+		{
+			Transparency = 0.08
+		}
+	):Play()
+
+	task.wait(
+		5
+	)
+
+	TweenService:Create(
+		Ring1,
+		TweenInfo.new(
+			0.7,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.In
+		),
+		{
+			Size =
+				UDim2.fromOffset(
+					470,
+					470
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-235,
+					CenterY,
+					-235
+				)
+		}
+	):Play()
+
+	TweenService:Create(
+		Ring2,
+		TweenInfo.new(
+			0.75,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.In
+		),
+		{
+			Size =
+				UDim2.fromOffset(
+					560,
+					560
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-280,
+					CenterY,
+					-280
+				)
+		}
+	):Play()
+
+	TweenService:Create(
+		Ring3,
+		TweenInfo.new(
+			0.85,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.In
+		),
+		{
+			Size =
+				UDim2.fromOffset(
+					670,
+					670
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-335,
+					CenterY,
+					-335
+				)
+		}
+	):Play()
+
+	TweenService:Create(
+		Credit,
+		TweenInfo.new(
+			0.45,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.In
+		),
+		{
+			TextTransparency = 1
+		}
+	):Play()
+
+	TweenService:Create(
+		CreditStroke,
+		TweenInfo.new(
+			0.45,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.In
+		),
+		{
+			Transparency = 1
+		}
+	):Play()
+
+	TweenService:Create(
+		AvatarStroke,
+		TweenInfo.new(
+			0.55,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.In
+		),
+		{
+			Transparency = 1
+		}
+	):Play()
+
+	TweenService:Create(
+		Avatar,
+		TweenInfo.new(
+			0.75,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.In
+		),
+		{
+			Size =
+				UDim2.fromOffset(
+					390,
+					390
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-195,
+					CenterY,
+					-195
+				),
+			ImageTransparency = 1
+		}
+	):Play()
+
+	TweenService:Create(
+		Glow,
+		TweenInfo.new(
+			0.8,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.In
+		),
+		{
+			ImageTransparency = 1,
+			Size =
+				UDim2.fromOffset(
+					850,
+					850
+				),
+			Position =
+				UDim2.new(
+					CenterX,
+					-425,
+					CenterY,
+					-425
+				)
+		}
+	):Play()
+
+	TweenService:Create(
+		CoreGlow,
+		TweenInfo.new(
+			0.7,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.In
+		),
+		{
+			ImageTransparency = 1
+		}
+	):Play()
+
+	task.wait(
+		0.75
+	)
+
+	TweenService:Create(
+		Intro,
+		TweenInfo.new(
+			0.5,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.In
+		),
+		{
+			BackgroundTransparency = 1
+		}
+	):Play()
+
+	task.wait(
+		0.55
+	)
+
+	if cameraConnection then
+		cameraConnection:Disconnect()
+	end
+
+	if Intro.Parent then
+		Intro:Destroy()
+	end
+end
+
+selectTab("ESP")
+setPanelVisible(false)
+
+task.spawn(
+	function()
+		task.wait(
+			0.35
+		)
+
+		pcall(
+			playCreatorIntro
+		)
+	end
+)
